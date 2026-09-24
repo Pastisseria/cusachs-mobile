@@ -1,15 +1,20 @@
 {
   "name": "cusachs-mobile",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build --base=/cusachs-mobile/",
+    "build": "vite build",
+    "build:web": "vite build --base=/cusachs-mobile/",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "android:sync": "npm run build && npx cap sync android",
+    "android:open": "npx cap open android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
     "@supabase/supabase-js": "^2.112.3",
     "lucide-react": "^1.31.0",
     "pdf-lib": "1.17.1",
@@ -21,6 +26,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
