@@ -1,27 +1,49 @@
-# Cusachs Hub
+# Cusachs Mobile — Android
 
-## Activar el acceso de usuarios
+Aplicación móvil de Cusachs Hub basada en React + Vite + Capacitor.
 
-1. En Supabase, abre **SQL Editor** y ejecuta `supabase/configurar_accesos.sql`.
-2. Abre **Authentication > Users** y crea el usuario administrador.
-3. Vuelve al final del archivo SQL, sustituye `TU_CORREO@EJEMPLO.COM` por su correo y ejecuta las tres líneas indicadas.
-4. Crea las demás cuentas desde **Authentication > Users**. Automáticamente serán cuentas de Catering.
+## Preparar Android por primera vez
 
-La aplicación utiliza las variables `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY` existentes. No se deben guardar contraseñas ni claves privadas dentro del proyecto.
+Requisitos en el ordenador:
 
-## Desarrollo
+- Node.js 20 o superior
+- Android Studio instalado
+- SDK de Android instalado desde Android Studio
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Después de descargar o clonar este repositorio:
 
-Currently, two official plugins are available:
+```bash
+npm install
+npm run android:add
+npm run android:prepare
+npm run android:open
+```
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+El primer comando instala las dependencias. `android:add` crea la carpeta nativa `android/`. `android:prepare` compila la aplicación web y sincroniza Capacitor. `android:open` abre el proyecto directamente en Android Studio.
 
-## React Compiler
+Una vez creada la carpeta `android/`, para cambios posteriores normalmente basta con:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm run android:prepare
+npm run android:open
+```
 
-## Expanding the Oxlint configuration
+## Identidad Android
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+- Nombre: Cusachs
+- App ID: `com.cusachs.mobile`
+- Web compilada: `dist`
+
+## Datos y acceso
+
+La aplicación mantiene la conexión existente mediante `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`. Las claves privadas no deben guardarse en GitHub.
+
+## Probar en móvil virtual
+
+En Android Studio, espera a que termine la sincronización de Gradle. Después abre **Device Manager**, crea un teléfono virtual (por ejemplo Pixel), arráncalo y pulsa **Run ▶**.
+
+## Desarrollo web
+
+```bash
+npm run dev
+```
