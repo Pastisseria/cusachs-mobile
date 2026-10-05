@@ -1,0 +1,3278 @@
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { supabase } from "../supabase.js";
+
+const ZONAS = ["Obrador", "Cocina", "Barra"];
+
+const ESTADOS = [
+  "Pendiente",
+  "En preparación",
+  "Terminado",
+  "Cancelado",
+];
+
+const FORMULARIO_INICIAL = {
+  id: null,
+  catering_id: "",
+  cliente_id: "",
+  cliente_nombre: "",
+  pedido_nombre: "",
+  fecha: "",
+  zona: "Obrador",
+  producto_id: "",
+  producto_nombre: "",
+  cantidad: "1",
+  unidad: "unidades",
+  responsable: "",
+  hora_limite: "",
+  estado: "Pendiente",
+  direccion_entrega: "",
+  observaciones: "",
+};
+
+function Produccion() {
+  const navigate = useNavigate();
+  const hoy = obtenerFechaISO(new Date());
+
+  const [fechaSeleccionada, setFechaSeleccionada] = useState(hoy);
+
+  const [producciones, setProducciones] = useState([]);
+  const [caterings, setCaterings] = useState([]);
+  const [clientes, setClientes] = useState([]);
+  const [productos, setProductos] = useState([]);
+
+  const [formulario, setFormulario] = useState({
+    ...FORMULARIO_INICIAL,
+    fecha: hoy,
+  });
+
+  const [modalAbierto, setModalAbierto] = useState(false);
+  const [cargando, setCargando] = useState(true);
+  const [guardando, setGuardando] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
+  const [error, setError] = useState("");
+  const [mensaje, setMensaje] = useState("");
+  const [vistaBarraSemanal, setVistaBarraSemanal] = useState(false);
+  const [mostrarTotales, setMostrarTotales] = useState(true);
+  const [fechaSemanaBarra, setFechaSemanaBarra] = useState(hoy);
+  const [zonaImpresionDiaria, setZonaImpresionDiaria] = useState("");
+
+  useEffect(() => {
+    inicializarProduccion();
+  }, []);
+
+  async function inicializarProduccion() {
+    await cargarDatos();
+  }
+
+
+  async function sincronizarProduccionAceptada({ silencioso = false } = {}) {
+    if (!silencioso) {
+      setSincronizando(true);
+      setError("");
+      setMensaje("");
+    }
+
+    try {
+      const [
+        respuestaCateringsAceptados,
+        respuestaProduccionesExistentes,
+      ] = await Promise.all([
+        supabase
+          .from("caterings")
+          .select(`
+            id,
+            presupuesto_id,
+            cliente_id,
+            titulo,
+            fecha,
+            hora_inicio,
+            direccion,
+            poblacion,
+            estado,
+            clientes (
+              id,
+              nombre,
+              empresa
+            )
+          `)
+          .in("estado", ["Aceptado", "Confirmado"])
+          .not("presupuesto_id", "is", null),
+
+        supabase
+          .from("producciones")
+          .select(`
+            id,
+            catering_id,
+            producto_id,
+            producto_nombre,
+            cantidad
+          `),
+      ]);
+
+      if (respuestaCateringsAceptados.error) {
+        throw respuestaCateringsAceptados.error;
+      }
+
+      if (respuestaProduccionesExistentes.error) {
+        throw respuestaProduccionesExistentes.error;
+      }
+
+      const cateringsAceptados =
+        respuestaCateringsAceptados.data || [];
+
+      if (cateringsAceptados.length === 0) {
+        if (!silencioso) {
+          setMensaje("No hay caterings aceptados pendientes de importar.");
+        }
+        return;
+      }
+
+      const presupuestosIds = [
+        ...new Set(
+          cateringsAceptados
+            .map((catering) => catering.presupuesto_id)
+            .filter(Boolean),
+        ),
+      ];
+
+      const { data: lineasPresupuesto, error: errorLineas } =
+        await supabase
+          .from("presupuesto_lineas")
+          .select(`
+            id,
+            presupuesto_id,
+            producto_id,
+            descripcion,
+            cantidad,
+            productos (
+              id,
+              nombre,
+              unidad,
+              unidad_medida,
+              zona_produccion,
+              zona,
+              seccion
+            )
+          `)
+          .in("presupuesto_id", presupuestosIds)
+          .order("created_at", { ascending: true });
+
+      if (errorLineas) {
+        throw errorLineas;
+      }
+
+      const produccionesExistentes =
+        respuestaProduccionesExistentes.data || [];
+
+      const clavesExistentes = new Set(
+        produccionesExistentes.map((linea) =>
+          crearClaveProduccion({
+            catering_id: linea.catering_id,
+            producto_id: linea.producto_id,
+            producto_nombre: linea.producto_nombre,
+            cantidad: linea.cantidad,
+          }),
+        ),
+      );
+
+      const nuevasProducciones = [];
+
+      cateringsAceptados.forEach((catering) => {
+        const lineasDelPresupuesto = (lineasPresupuesto || []).filter(
+          (linea) =>
+            String(linea.presupuesto_id) ===
+            String(catering.presupuesto_id),
+        );
+
+        const clienteNombre =
+          obtenerNombreCliente(catering.clientes) ||
+          catering.titulo ||
+          "Cliente";
+
+        const direccionCompleta = [
+          catering.direccion,
+          catering.poblacion,
+        ]
+          .filter(Boolean)
+          .join(", ");
+
+        lineasDelPresupuesto.forEach((linea) => {
+          const producto = linea.productos || null;
+          const productoNombre =
+            producto?.nombre ||
+            linea.descripcion ||
+            "Producto";
+
+          const cantidad = Number(linea.cantidad || 0);
+
+          if (cantidad <= 0) return;
+
+          const clave = crearClaveProduccion({
+            catering_id: catering.id,
+            producto_id: linea.producto_id,
+            producto_nombre: productoNombre,
+            cantidad,
+          });
+
+          if (clavesExistentes.has(clave)) return;
+
+          clavesExistentes.add(clave);
+
+          nuevasProducciones.push({
+            catering_id: catering.id,
+            cliente_id: catering.cliente_id || null,
+            cliente_nombre: clienteNombre,
+            pedido_nombre:
+              catering.titulo || "Catering aceptado",
+            fecha: catering.fecha,
+            zona: determinarZonaProduccion(
+              producto,
+              productoNombre,
+            ),
+            producto_id: linea.producto_id || null,
+            producto_nombre: productoNombre,
+            cantidad,
+            unidad:
+              producto?.unidad ||
+              producto?.unidad_medida ||
+              "unidades",
+            responsable: null,
+            hora_limite: catering.hora_inicio || null,
+            estado: "Pendiente",
+            direccion_entrega: direccionCompleta || null,
+            observaciones: null,
+            updated_at: new Date().toISOString(),
+          });
+        });
+      });
+
+      if (nuevasProducciones.length === 0) {
+        if (!silencioso) {
+          setMensaje(
+            "La producción de los caterings aceptados ya estaba sincronizada.",
+          );
+        }
+        return;
+      }
+
+      const { error: errorInsercion } = await supabase
+        .from("producciones")
+        .insert(nuevasProducciones);
+
+      if (errorInsercion) {
+        throw errorInsercion;
+      }
+
+      if (!silencioso) {
+        setMensaje(
+          `${nuevasProducciones.length} líneas de producción creadas correctamente.`,
+        );
+      }
+    } catch (err) {
+      setError(
+        err.message ||
+          "No se ha podido importar la producción de los caterings aceptados.",
+      );
+    } finally {
+      if (!silencioso) {
+        setSincronizando(false);
+      }
+    }
+  }
+
+  async function cargarDatos() {
+    setCargando(true);
+    setError("");
+
+    try {
+      const [
+        respuestaProducciones,
+        respuestaCaterings,
+        respuestaClientes,
+        respuestaProductos,
+      ] = await Promise.all([
+        supabase
+          .from("producciones")
+          .select("*")
+          .order("fecha", { ascending: true })
+          .order("hora_limite", { ascending: true })
+          .order("created_at", { ascending: true }),
+
+        supabase
+          .from("caterings")
+          .select(
+            `
+              id,
+              titulo,
+              fecha,
+              hora_inicio,
+              hora_fin,
+              direccion,
+              poblacion,
+              cliente_id,
+              presupuesto_id,
+              estado
+            `,
+          )
+          .order("fecha", { ascending: true }),
+
+        supabase
+          .from("clientes")
+          .select("id, nombre, empresa")
+          .order("nombre", { ascending: true }),
+
+        supabase
+          .from("productos")
+          .select("*")
+          .order("nombre", { ascending: true }),
+      ]);
+
+      if (respuestaProducciones.error) {
+        throw respuestaProducciones.error;
+      }
+
+      if (respuestaCaterings.error) {
+        throw respuestaCaterings.error;
+      }
+
+      if (respuestaClientes.error) {
+        throw respuestaClientes.error;
+      }
+
+      if (respuestaProductos.error) {
+        throw respuestaProductos.error;
+      }
+
+      // La zona guardada en cada línea manda sobre la zona general del producto.
+      // Así, los movimientos manuales no se deshacen al recargar la pantalla.
+      setProducciones(respuestaProducciones.data || []);
+      setCaterings(respuestaCaterings.data || []);
+      setClientes(respuestaClientes.data || []);
+      setProductos(respuestaProductos.data || []);
+    } catch (err) {
+      setError(
+        err.message || "No se ha podido cargar la producción.",
+      );
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  const produccionesFecha = useMemo(() => {
+    return producciones.filter(
+      (linea) => linea.fecha === fechaSeleccionada,
+    );
+  }, [producciones, fechaSeleccionada]);
+
+  const resumenProductosSemana = useMemo(() => {
+    const base = new Date(`${fechaSeleccionada}T12:00:00`);
+    const diferenciaLunes = base.getDay() === 0 ? -6 : 1 - base.getDay();
+    const lunes = new Date(base);
+    lunes.setDate(base.getDate() + diferenciaLunes);
+    const dias = Array.from({ length: 7 }, (_, indice) => {
+      const fecha = new Date(lunes);
+      fecha.setDate(lunes.getDate() + indice);
+      return obtenerFechaISO(fecha);
+    });
+    const mapa = {};
+    producciones
+      .filter((linea) =>
+        dias.includes(linea.fecha) &&
+        linea.estado !== "Cancelado",
+      )
+      .forEach((linea) => {
+        const nombre = String(linea.producto_nombre || "Producto sin nombre").trim();
+        const unidad = String(linea.unidad || "unidades").trim();
+        const nombreNormalizado = nombre.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
+        const clave = `${nombreNormalizado}|${unidad.toLowerCase()}`;
+        if (!mapa[clave]) mapa[clave] = { clave, nombre, unidad, dias: {}, total: 0 };
+        const cantidad = Number(linea.cantidad || 0);
+        mapa[clave].dias[linea.fecha] = (mapa[clave].dias[linea.fecha] || 0) + cantidad;
+        mapa[clave].total += cantidad;
+      });
+    return {
+      dias,
+      productos: Object.values(mapa).sort((a, b) => a.nombre.localeCompare(b.nombre, "es")),
+    };
+  }, [producciones, fechaSeleccionada]);
+
+  const pedidosAgrupados = useMemo(() => {
+    const grupos = {};
+
+    produccionesFecha.forEach((linea) => {
+      const clave =
+        linea.catering_id ||
+        `${linea.cliente_nombre || "Sin cliente"}-${
+          linea.pedido_nombre || "Pedido manual"
+        }`;
+
+      if (!grupos[clave]) {
+        grupos[clave] = {
+          clave,
+          catering_id: linea.catering_id,
+          presupuesto_id:
+            caterings.find(
+              (catering) => String(catering.id) === String(linea.catering_id),
+            )?.presupuesto_id || null,
+          cliente_id: linea.cliente_id,
+          cliente_nombre:
+            linea.cliente_nombre || "Cliente sin indicar",
+          pedido_nombre:
+            linea.pedido_nombre || "Pedido sin nombre",
+          direccion_entrega: linea.direccion_entrega || "",
+          hora_limite: linea.hora_limite || "",
+          lineas: [],
+        };
+      }
+
+      grupos[clave].lineas.push(linea);
+    });
+
+    return Object.values(grupos).sort((a, b) => {
+      return String(a.hora_limite || "").localeCompare(
+        String(b.hora_limite || ""),
+      );
+    });
+  }, [produccionesFecha, caterings]);
+
+  const resumen = useMemo(() => {
+    const total = produccionesFecha.length;
+
+    const pendientes = produccionesFecha.filter(
+      (linea) => linea.estado === "Pendiente",
+    ).length;
+
+    const enPreparacion = produccionesFecha.filter(
+      (linea) => linea.estado === "En preparación",
+    ).length;
+
+    const terminados = produccionesFecha.filter(
+      (linea) => linea.estado === "Terminado",
+    ).length;
+
+    return {
+      total,
+      pendientes,
+      enPreparacion,
+      terminados,
+    };
+  }, [produccionesFecha]);
+
+  const diasSemanaBarra = useMemo(() => {
+    const fechaBase = new Date(`${fechaSemanaBarra}T12:00:00`);
+    const diaSemana = fechaBase.getDay();
+    const diferenciaLunes = diaSemana === 0 ? -6 : 1 - diaSemana;
+
+    const lunes = new Date(fechaBase);
+    lunes.setDate(fechaBase.getDate() + diferenciaLunes);
+
+    return Array.from({ length: 7 }, (_, indice) => {
+      const fecha = new Date(lunes);
+      fecha.setDate(lunes.getDate() + indice);
+
+      return {
+        fecha: obtenerFechaISO(fecha),
+        nombre: new Intl.DateTimeFormat("es-ES", {
+          weekday: "long",
+        }).format(fecha),
+        diaMes: new Intl.DateTimeFormat("es-ES", {
+          day: "2-digit",
+          month: "2-digit",
+        }).format(fecha),
+      };
+    });
+  }, [fechaSemanaBarra]);
+
+  const produccionBarraSemana = useMemo(() => {
+    const fechasSemana = new Set(diasSemanaBarra.map((dia) => dia.fecha));
+
+    const lineasBarra = producciones
+      .filter(
+        (linea) =>
+          linea.zona === "Barra" &&
+          linea.estado !== "Cancelado",
+      )
+      .map((linea) => ({
+        ...linea,
+        fecha_preparacion: obtenerDiaAnterior(linea.fecha),
+      }))
+      .filter((linea) => fechasSemana.has(linea.fecha_preparacion));
+
+    const agrupado = {};
+
+    diasSemanaBarra.forEach((dia) => {
+      agrupado[dia.fecha] = {};
+    });
+
+    lineasBarra.forEach((linea) => {
+      const clavePedido =
+        linea.catering_id ||
+        `${linea.cliente_nombre || "Sin cliente"}-${
+          linea.pedido_nombre || "Pedido"
+        }`;
+
+      if (!agrupado[linea.fecha_preparacion][clavePedido]) {
+        agrupado[linea.fecha_preparacion][clavePedido] = {
+          clave: clavePedido,
+          cliente_nombre: linea.cliente_nombre || "Cliente",
+          pedido_nombre: linea.pedido_nombre || "Pedido",
+          lineas: [],
+        };
+      }
+
+      agrupado[linea.fecha_preparacion][clavePedido].lineas.push(linea);
+    });
+
+    return agrupado;
+  }, [producciones, diasSemanaBarra]);
+
+  function cambiarSemanaBarra(semanas) {
+    const fecha = new Date(`${fechaSemanaBarra}T12:00:00`);
+    fecha.setDate(fecha.getDate() + semanas * 7);
+    setFechaSemanaBarra(obtenerFechaISO(fecha));
+  }
+
+  function imprimirZonaDiaria(zona) {
+    setZonaImpresionDiaria(zona);
+
+    const limpiar = () => {
+      document.body.classList.remove("imprimiendo-zona-diaria");
+      setZonaImpresionDiaria("");
+      window.removeEventListener("afterprint", limpiar);
+    };
+
+    document.body.classList.add("imprimiendo-zona-diaria");
+    window.addEventListener("afterprint", limpiar);
+
+    window.setTimeout(() => {
+      window.print();
+    }, 80);
+  }
+
+  function imprimirBarraSemanal() {
+    const limpiar = () => {
+      document.body.classList.remove("imprimiendo-barra-semanal");
+      window.removeEventListener("afterprint", limpiar);
+    };
+
+    document.body.classList.add("imprimiendo-barra-semanal");
+    window.addEventListener("afterprint", limpiar);
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.print();
+      });
+    });
+  }
+
+  function imprimirResumenProductos() {
+    const limpiar = () => {
+      document.body.classList.remove("imprimiendo-resumen-productos");
+      window.removeEventListener("afterprint", limpiar);
+    };
+
+    document.body.classList.add("imprimiendo-resumen-productos");
+    window.addEventListener("afterprint", limpiar);
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => window.print());
+    });
+  }
+
+  const cateringsFecha = useMemo(() => {
+    return caterings.filter(
+      (catering) =>
+        catering.fecha === formulario.fecha &&
+        ["Aceptado", "Confirmado"].includes(catering.estado),
+    );
+  }, [caterings, formulario.fecha]);
+
+  const productosZona = useMemo(() => {
+    return productos.filter((producto) => {
+      const zonaProducto =
+        producto.zona_produccion ||
+        producto.zona ||
+        producto.seccion ||
+        "";
+
+      if (!zonaProducto) return true;
+
+      return zonaProducto === formulario.zona;
+    });
+  }, [productos, formulario.zona]);
+
+  function cambiarFecha(dias) {
+    const fecha = new Date(
+      `${fechaSeleccionada}T12:00:00`,
+    );
+
+    fecha.setDate(fecha.getDate() + dias);
+
+    setFechaSeleccionada(obtenerFechaISO(fecha));
+  }
+
+  function irAHoy() {
+    setFechaSeleccionada(obtenerFechaISO(new Date()));
+  }
+
+  function abrirNuevaLinea(datosPedido = null, zona = "Obrador") {
+    setError("");
+    setMensaje("");
+
+    if (datosPedido) {
+      setFormulario({
+        ...FORMULARIO_INICIAL,
+        catering_id: datosPedido.catering_id || "",
+        cliente_id: datosPedido.cliente_id || "",
+        cliente_nombre: datosPedido.cliente_nombre || "",
+        pedido_nombre: datosPedido.pedido_nombre || "",
+        fecha: fechaSeleccionada,
+        zona,
+        direccion_entrega:
+          datosPedido.direccion_entrega || "",
+        hora_limite: cortarHora(datosPedido.hora_limite),
+      });
+    } else {
+      setFormulario({
+        ...FORMULARIO_INICIAL,
+        fecha: fechaSeleccionada,
+        zona,
+      });
+    }
+
+    setModalAbierto(true);
+  }
+
+  function abrirEditarLinea(linea) {
+    setError("");
+    setMensaje("");
+
+    setFormulario({
+      id: linea.id,
+      catering_id: linea.catering_id || "",
+      cliente_id: linea.cliente_id || "",
+      cliente_nombre: linea.cliente_nombre || "",
+      pedido_nombre: linea.pedido_nombre || "",
+      fecha: linea.fecha || fechaSeleccionada,
+      zona: linea.zona || "Obrador",
+      producto_id: linea.producto_id || "",
+      producto_nombre: linea.producto_nombre || "",
+      cantidad: String(linea.cantidad ?? 1),
+      unidad: linea.unidad || "unidades",
+      responsable: linea.responsable || "",
+      hora_limite: cortarHora(linea.hora_limite),
+      estado: linea.estado || "Pendiente",
+      direccion_entrega: linea.direccion_entrega || "",
+      observaciones: linea.observaciones || "",
+    });
+
+    setModalAbierto(true);
+  }
+
+  function cerrarModal() {
+    if (guardando) return;
+
+    setModalAbierto(false);
+
+    setFormulario({
+      ...FORMULARIO_INICIAL,
+      fecha: fechaSeleccionada,
+    });
+  }
+
+  function modificarFormulario(campo, valor) {
+    setFormulario((anterior) => ({
+      ...anterior,
+      [campo]: valor,
+    }));
+  }
+
+  function seleccionarCatering(cateringId) {
+    const catering = caterings.find(
+      (elemento) => elemento.id === cateringId,
+    );
+
+    if (!catering) {
+      setFormulario((anterior) => ({
+        ...anterior,
+        catering_id: "",
+      }));
+
+      return;
+    }
+
+    const cliente = clientes.find(
+      (elemento) => elemento.id === catering.cliente_id,
+    );
+
+    const direccionCompleta = [
+      catering.direccion,
+      catering.poblacion,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    setFormulario((anterior) => ({
+      ...anterior,
+      catering_id: catering.id,
+      cliente_id: catering.cliente_id || "",
+      cliente_nombre: obtenerNombreCliente(cliente),
+      pedido_nombre: catering.titulo || "",
+      fecha: catering.fecha || anterior.fecha,
+      hora_limite: cortarHora(catering.hora_inicio),
+      direccion_entrega: direccionCompleta,
+    }));
+  }
+
+  function seleccionarCliente(clienteId) {
+    const cliente = clientes.find(
+      (elemento) => elemento.id === clienteId,
+    );
+
+    setFormulario((anterior) => ({
+      ...anterior,
+      cliente_id: clienteId,
+      cliente_nombre: obtenerNombreCliente(cliente),
+    }));
+  }
+
+  function seleccionarProducto(productoId) {
+    const producto = productos.find(
+      (elemento) => elemento.id === productoId,
+    );
+
+    if (!producto) {
+      setFormulario((anterior) => ({
+        ...anterior,
+        producto_id: "",
+      }));
+
+      return;
+    }
+
+    const zonaProducto =
+      producto.zona_produccion ||
+      producto.zona ||
+      formulario.zona;
+
+    const unidadProducto =
+      producto.unidad ||
+      producto.unidad_medida ||
+      "unidades";
+
+    setFormulario((anterior) => ({
+      ...anterior,
+      producto_id: producto.id,
+      producto_nombre:
+        producto.nombre || producto.descripcion || "",
+      zona: ZONAS.includes(zonaProducto)
+        ? zonaProducto
+        : anterior.zona,
+      unidad: unidadProducto,
+    }));
+  }
+
+  async function guardarLinea(event) {
+    event.preventDefault();
+
+    if (!formulario.cliente_nombre.trim()) {
+      setError("Selecciona o escribe el nombre del cliente.");
+      return;
+    }
+
+    if (!formulario.pedido_nombre.trim()) {
+      setError("Escribe el nombre del pedido.");
+      return;
+    }
+
+    if (!formulario.fecha) {
+      setError("Selecciona una fecha de producción.");
+      return;
+    }
+
+    if (!formulario.producto_nombre.trim()) {
+      setError("Selecciona o escribe un producto.");
+      return;
+    }
+
+    if (Number(formulario.cantidad) <= 0) {
+      setError("La cantidad debe ser superior a cero.");
+      return;
+    }
+
+    setGuardando(true);
+    setError("");
+    setMensaje("");
+
+    const datos = {
+      catering_id: formulario.catering_id || null,
+      cliente_id: formulario.cliente_id || null,
+      cliente_nombre:
+        formulario.cliente_nombre.trim(),
+      pedido_nombre: formulario.pedido_nombre.trim(),
+      fecha: formulario.fecha,
+      zona: formulario.zona,
+      producto_id: formulario.producto_id || null,
+      producto_nombre:
+        formulario.producto_nombre.trim(),
+      cantidad: Number(formulario.cantidad),
+      unidad: formulario.unidad.trim() || "unidades",
+      responsable:
+        formulario.responsable.trim() || null,
+      hora_limite: formulario.hora_limite || null,
+      estado: formulario.estado,
+      direccion_entrega:
+        formulario.direccion_entrega.trim() || null,
+      observaciones:
+        formulario.observaciones.trim() || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    try {
+      if (formulario.id) {
+        const { error: errorSupabase } = await supabase
+          .from("producciones")
+          .update(datos)
+          .eq("id", formulario.id);
+
+        if (errorSupabase) {
+          throw errorSupabase;
+        }
+
+        setMensaje(
+          "Línea de producción actualizada correctamente.",
+        );
+      } else {
+        const { error: errorSupabase } = await supabase
+          .from("producciones")
+          .insert(datos);
+
+        if (errorSupabase) {
+          throw errorSupabase;
+        }
+
+        setMensaje(
+          "Línea de producción creada correctamente.",
+        );
+      }
+
+      setFechaSeleccionada(formulario.fecha);
+      setModalAbierto(false);
+
+      setFormulario({
+        ...FORMULARIO_INICIAL,
+        fecha: formulario.fecha,
+      });
+
+      await cargarDatos();
+    } catch (err) {
+      setError(
+        err.message ||
+          "No se ha podido guardar la producción.",
+      );
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  async function cambiarEstado(linea, nuevoEstado) {
+    setError("");
+    setMensaje("");
+
+    try {
+      const { error: errorSupabase } = await supabase
+        .from("producciones")
+        .update({
+          estado: nuevoEstado,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", linea.id);
+
+      if (errorSupabase) {
+        throw errorSupabase;
+      }
+
+      setProducciones((anteriores) =>
+        anteriores.map((elemento) =>
+          elemento.id === linea.id
+            ? {
+                ...elemento,
+                estado: nuevoEstado,
+              }
+            : elemento,
+        ),
+      );
+    } catch (err) {
+      setError(
+        err.message ||
+          "No se ha podido cambiar el estado.",
+      );
+    }
+  }
+
+  async function moverLinea(linea, nuevaZona) {
+    if (!nuevaZona || nuevaZona === linea.zona) return;
+
+    setError("");
+    setMensaje("");
+
+    try {
+      const { error: errorSupabase } = await supabase
+        .from("producciones")
+        .update({
+          zona: nuevaZona,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", linea.id);
+
+      if (errorSupabase) throw errorSupabase;
+
+      setProducciones((anteriores) =>
+        anteriores.map((elemento) =>
+          elemento.id === linea.id ? { ...elemento, zona: nuevaZona } : elemento,
+        ),
+      );
+      setMensaje(`${linea.producto_nombre} movido a ${nuevaZona}.`);
+    } catch (err) {
+      setError(err.message || "No se ha podido mover el producto.");
+    }
+  }
+
+  async function duplicarLinea(linea, nuevaZona) {
+    if (!nuevaZona) return;
+
+    setError("");
+    setMensaje("");
+
+    const copia = {
+      catering_id: linea.catering_id || null,
+      cliente_id: linea.cliente_id || null,
+      cliente_nombre: linea.cliente_nombre,
+      pedido_nombre: linea.pedido_nombre,
+      fecha: linea.fecha,
+      zona: nuevaZona,
+      producto_id: linea.producto_id || null,
+      producto_nombre: linea.producto_nombre,
+      cantidad: linea.cantidad,
+      unidad: linea.unidad || "unidades",
+      responsable: linea.responsable || null,
+      hora_limite: linea.hora_limite || null,
+      estado: linea.estado || "Pendiente",
+      direccion_entrega: linea.direccion_entrega || null,
+      observaciones: linea.observaciones || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    try {
+      const { data, error: errorSupabase } = await supabase
+        .from("producciones")
+        .insert(copia)
+        .select()
+        .single();
+
+      if (errorSupabase) throw errorSupabase;
+
+      setProducciones((anteriores) => [...anteriores, data]);
+      setMensaje(`${linea.producto_nombre} duplicado también en ${nuevaZona}.`);
+    } catch (err) {
+      setError(err.message || "No se ha podido duplicar el producto.");
+    }
+  }
+
+  async function eliminarLinea() {
+    if (!formulario.id) return;
+
+    const confirmado = window.confirm(
+      "¿Seguro que quieres eliminar esta línea de producción?",
+    );
+
+    if (!confirmado) return;
+
+    setGuardando(true);
+    setError("");
+    setMensaje("");
+
+    try {
+      const { error: errorSupabase } = await supabase
+        .from("producciones")
+        .delete()
+        .eq("id", formulario.id);
+
+      if (errorSupabase) {
+        throw errorSupabase;
+      }
+
+      setModalAbierto(false);
+      setMensaje(
+        "Línea de producción eliminada correctamente.",
+      );
+
+      setFormulario({
+        ...FORMULARIO_INICIAL,
+        fecha: fechaSeleccionada,
+      });
+
+      await cargarDatos();
+    } catch (err) {
+      setError(
+        err.message ||
+          "No se ha podido eliminar la línea.",
+      );
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  return (
+    <>
+      <style>{ESTILOS_PRODUCCION}</style>
+
+      <section className="panel produccion-panel">
+        <div className="produccion-cabecera">
+          <div>
+            <p className="produccion-etiqueta">
+              GESTIÓN DIARIA
+            </p>
+
+            <h2>Producción por pedido</h2>
+
+            <p className="produccion-descripcion">
+              Cada cliente y pedido se muestra por separado.
+            </p>
+          </div>
+
+          <div className="produccion-acciones-cabecera">
+            <button
+              type="button"
+              className="boton-secundario-produccion"
+              onClick={cargarDatos}
+              disabled={cargando}
+            >
+              {cargando ? "Actualizando..." : "🔄 Recargar producción"}
+            </button>
+
+            <button
+              type="button"
+              className="boton-secundario-produccion"
+              onClick={() => setVistaBarraSemanal((anterior) => !anterior)}
+            >
+              {vistaBarraSemanal
+                ? "↩ Volver a Producción"
+                : "☕ Vista semanal Barra"}
+            </button>
+
+
+            {!vistaBarraSemanal && (
+              <button
+                type="button"
+                className="boton-secundario-produccion"
+                onClick={() => setMostrarTotales((anterior) => !anterior)}
+              >
+                {mostrarTotales ? "Ocultar totales" : "📊 Ver totales día y semana"}
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => abrirNuevaLinea()}
+            >
+              + Añadir producción
+            </button>
+          </div>
+        </div>
+
+        {vistaBarraSemanal ? (
+          <section className="barra-semanal-panel">
+            <div className="barra-semanal-cabecera no-imprimir-barra">
+              <div>
+                <p className="produccion-etiqueta">BARRA</p>
+                <h3>Plan semanal de Barra</h3>
+                <p>
+                  Preparación por días, sin horas. Pensado para imprimir y
+                  preparar el día anterior.
+                </p>
+              </div>
+
+              <div className="barra-semanal-acciones">
+                <button
+                  type="button"
+                  className="boton-secundario-produccion"
+                  onClick={() => cambiarSemanaBarra(-1)}
+                >
+                  ← Semana anterior
+                </button>
+
+                <button
+                  type="button"
+                  className="boton-secundario-produccion"
+                  onClick={() => setFechaSemanaBarra(hoy)}
+                >
+                  Esta semana
+                </button>
+
+                <button
+                  type="button"
+                  className="boton-secundario-produccion"
+                  onClick={() => cambiarSemanaBarra(1)}
+                >
+                  Semana siguiente →
+                </button>
+
+                <button type="button" onClick={imprimirBarraSemanal}>
+                  🖨️ Imprimir Barra
+                </button>
+              </div>
+            </div>
+
+            <div className="barra-semanal-hoja">
+              <div className="barra-semanal-titulo-print">
+                <div>
+                  <strong>PASTISSERIA CUSACHS</strong>
+                  <h2>Plan semanal de Barra</h2>
+                </div>
+                <span>
+                  {diasSemanaBarra[0]?.diaMes} -{" "}
+                  {diasSemanaBarra[6]?.diaMes}
+                </span>
+              </div>
+
+              <div className="barra-semanal-grid">
+                {diasSemanaBarra.map((dia) => {
+                  const pedidosDia = Object.values(
+                    produccionBarraSemana[dia.fecha] || {},
+                  );
+
+                  return (
+                    <section key={dia.fecha} className="barra-semanal-dia">
+                      <div className="barra-semanal-dia-cabecera">
+                        <strong>{dia.nombre}</strong>
+                        <span>{dia.diaMes}</span>
+                      </div>
+
+                      {pedidosDia.length === 0 ? (
+                        <div className="barra-semanal-vacio">Sin preparación</div>
+                      ) : (
+                        pedidosDia.map((pedido) => (
+                          <div
+                            key={pedido.clave}
+                            className="barra-semanal-pedido"
+                          >
+                            <div className="barra-semanal-pedido-cabecera">
+                              <strong>{pedido.cliente_nombre}</strong>
+                              <span>{pedido.pedido_nombre}</span>
+                            </div>
+
+                            <div className="barra-semanal-lineas">
+                              {pedido.lineas.map((linea) => (
+                                <div
+                                  key={linea.id}
+                                  className="barra-semanal-linea"
+                                >
+                                  <span className="barra-check">☐</span>
+                                  <span className="barra-cantidad">
+                                    {formatearCantidad(linea.cantidad)}
+                                  </span>
+                                  <span className="barra-producto">
+                                    {linea.producto_nombre}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+        ) : (
+          <>
+        <div className="produccion-fecha-barra">
+          <div className="produccion-navegacion">
+            <button
+              type="button"
+              onClick={() => cambiarFecha(-1)}
+            >
+              ←
+            </button>
+
+            <button
+              type="button"
+              className="boton-secundario-produccion"
+              onClick={irAHoy}
+            >
+              Hoy
+            </button>
+
+            <button
+              type="button"
+              onClick={() => cambiarFecha(1)}
+            >
+              →
+            </button>
+          </div>
+
+          <label className="produccion-selector-fecha">
+            Fecha de producción
+            <input
+              type="date"
+              value={fechaSeleccionada}
+              onChange={(event) =>
+                setFechaSeleccionada(event.target.value)
+              }
+            />
+          </label>
+
+          <div className="produccion-fecha-texto">
+            {formatearFecha(fechaSeleccionada)}
+          </div>
+
+          <div className="produccion-impresion-diaria">
+            <button
+              type="button"
+              className="boton-secundario-produccion"
+              onClick={() => imprimirZonaDiaria("Obrador")}
+            >
+              🖨️ Imprimir Obrador
+            </button>
+
+            <button
+              type="button"
+              className="boton-secundario-produccion"
+              onClick={() => imprimirZonaDiaria("Cocina")}
+            >
+              🖨️ Imprimir Cocina
+            </button>
+
+            <button
+              type="button"
+              onClick={() => imprimirZonaDiaria("Todas")}
+            >
+              🖨️ Imprimir toda la producción
+            </button>
+          </div>
+        </div>
+
+        <div className="produccion-resumen">
+          <div className="produccion-resumen-tarjeta">
+            <span>Pedidos</span>
+            <strong>{pedidosAgrupados.length}</strong>
+          </div>
+
+          <div className="produccion-resumen-tarjeta">
+            <span>Líneas</span>
+            <strong>{resumen.total}</strong>
+          </div>
+
+          <div className="produccion-resumen-tarjeta pendiente">
+            <span>Pendientes</span>
+            <strong>{resumen.pendientes}</strong>
+          </div>
+
+          <div className="produccion-resumen-tarjeta preparacion">
+            <span>En preparación</span>
+            <strong>{resumen.enPreparacion}</strong>
+          </div>
+
+          <div className="produccion-resumen-tarjeta terminado">
+            <span>Terminadas</span>
+            <strong>{resumen.terminados}</strong>
+          </div>
+        </div>
+
+
+        {mostrarTotales && (
+          <section className="produccion-totales-productos">
+            <div className="produccion-totales-cabecera">
+              <div>
+                <p className="produccion-etiqueta">RESUMEN DE PRODUCTOS</p>
+                <h3>
+                  Semana del {new Date(`${resumenProductosSemana.dias[0]}T12:00:00`).getDate()} al{" "}
+                  {new Date(`${resumenProductosSemana.dias[6]}T12:00:00`).getDate()}
+                </h3>
+                <small>Obrador, Cocina y Barra</small>
+              </div>
+              <div className="produccion-totales-acciones">
+                <span>Día seleccionado: {formatearFecha(fechaSeleccionada)}</span>
+                <button type="button" onClick={imprimirResumenProductos}>
+                  🖨️ Imprimir resumen de productos
+                </button>
+              </div>
+            </div>
+
+            {resumenProductosSemana.productos.length === 0 ? (
+              <p className="produccion-totales-vacio">No hay productos esta semana.</p>
+            ) : (
+              <div className="produccion-totales-tabla-contenedor">
+                <table className="produccion-totales-tabla">
+                  <thead>
+                    <tr>
+                      <th>Producto</th>
+                      {resumenProductosSemana.dias.map((fecha) => (
+                        <th key={fecha}>
+                          {new Intl.DateTimeFormat("es-ES", { weekday: "short", day: "numeric" }).format(new Date(`${fecha}T12:00:00`))}
+                        </th>
+                      ))}
+                      <th>Total semana</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {resumenProductosSemana.productos.map((producto) => (
+                      <tr key={producto.clave}>
+                        <th>{producto.nombre}<small>{producto.unidad}</small></th>
+                        {resumenProductosSemana.dias.map((fecha) => (
+                          <td key={fecha} className={fecha === fechaSeleccionada ? "dia-seleccionado" : ""}>
+                            {producto.dias[fecha] ? formatearCantidad(producto.dias[fecha]) : "—"}
+                          </td>
+                        ))}
+                        <td className="total-semana">{formatearCantidad(producto.total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+              </div>
+            )}
+
+            <div className="produccion-totales-lista-print">
+              {resumenProductosSemana.productos.map((producto) => (
+                <article key={`print-resumen-${producto.clave}`}>
+                  <div>
+                    <strong>{producto.nombre}</strong>
+                    <small>{producto.unidad}</small>
+                  </div>
+                  <p>
+                    {resumenProductosSemana.dias
+                      .filter((fecha) => producto.dias[fecha])
+                      .map((fecha) => (
+                        <span key={fecha}>
+                          {new Intl.DateTimeFormat("es-ES", { weekday: "short", day: "numeric" }).format(new Date(`${fecha}T12:00:00`))}:{" "}
+                          <b>{formatearCantidad(producto.dias[fecha])}</b>
+                        </span>
+                      ))}
+                  </p>
+                  <em>Total semana: <b>{formatearCantidad(producto.total)}</b></em>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {error && (
+          <div className="produccion-error">
+            <strong>Error:</strong> {error}
+          </div>
+        )}
+
+        {mensaje && (
+          <div className="produccion-mensaje">
+            {mensaje}
+          </div>
+        )}
+
+        {cargando ? (
+          <div className="produccion-cargando">
+            Cargando producción...
+          </div>
+        ) : pedidosAgrupados.length === 0 ? (
+          <div className="produccion-vacia">
+            <div className="produccion-vacia-icono">
+              ✓
+            </div>
+
+            <h3>No hay producción para este día</h3>
+
+            <p>
+              Acepta un presupuesto para enviarlo automáticamente
+              a Producción, o añade una línea manualmente.
+            </p>
+
+            <button
+              type="button"
+              onClick={() => abrirNuevaLinea()}
+            >
+              + Añadir producción
+            </button>
+          </div>
+        ) : (
+          <div className="produccion-pedidos">
+            {pedidosAgrupados.map((pedido) => (
+              <article
+                key={pedido.clave}
+                className="produccion-pedido"
+              >
+                <div className="produccion-pedido-cabecera">
+                  <div>
+                    <p className="produccion-cliente">
+                      {pedido.cliente_nombre}
+                    </p>
+
+                    <h3>{pedido.pedido_nombre}</h3>
+
+                    <div className="produccion-datos-pedido">
+                      {pedido.hora_limite && (
+                        <span>
+                          🕒{" "}
+                          {cortarHora(pedido.hora_limite)}
+                        </span>
+                      )}
+
+                      {pedido.direccion_entrega && (
+                        <span>
+                          📍 {pedido.direccion_entrega}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="produccion-pedido-acciones no-imprimir">
+                    {pedido.presupuesto_id && (
+                      <button
+                        type="button"
+                        className="boton-abrir-presupuesto"
+                        onClick={() =>
+                          navigate(
+                            `/presupuestos?presupuesto_id=${pedido.presupuesto_id}&editar=1`,
+                          )
+                        }
+                      >
+                        ✏️ Abrir presupuesto
+                      </button>
+                    )}
+
+                    <span className="produccion-numero-lineas">
+                      {pedido.lineas.length}{" "}
+                      {pedido.lineas.length === 1
+                        ? "línea"
+                        : "líneas"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="produccion-zonas">
+                  {ZONAS.map((zona) => {
+                    const lineasZona =
+                      pedido.lineas.filter(
+                        (linea) => linea.zona === zona,
+                      );
+
+                    return (
+                      <section
+                        key={zona}
+                        className="produccion-zona"
+                      >
+                        <div className="produccion-zona-cabecera">
+                          <h4>
+                            {obtenerIconoZona(zona)} {zona}
+                          </h4>
+
+                          <button
+                            type="button"
+                            className="boton-anadir-zona"
+                            onClick={() =>
+                              abrirNuevaLinea(pedido, zona)
+                            }
+                          >
+                            +
+                          </button>
+                        </div>
+
+                        {lineasZona.length === 0 ? (
+                          <p className="produccion-zona-vacia">
+                            Sin productos
+                          </p>
+                        ) : (
+                          <div className="produccion-lineas">
+                            {lineasZona.map((linea) => (
+                              <div
+                                key={linea.id}
+                                className={[
+                                  "produccion-linea",
+                                  `linea-${normalizarClase(
+                                    linea.estado,
+                                  )}`,
+                                ].join(" ")}
+                              >
+                                <button
+                                  type="button"
+                                  className="produccion-producto"
+                                  onClick={() =>
+                                    abrirEditarLinea(linea)
+                                  }
+                                >
+                                  <strong>
+                                    {linea.producto_nombre}
+                                  </strong>
+
+                                  <span>
+                                    {formatearCantidad(
+                                      linea.cantidad,
+                                    )}{" "}
+                                    {linea.unidad}
+                                  </span>
+
+                                  {linea.responsable && (
+                                    <small>
+                                      Responsable:{" "}
+                                      {linea.responsable}
+                                    </small>
+                                  )}
+
+                                  {linea.observaciones && (
+                                    <small>
+                                      {linea.observaciones}
+                                    </small>
+                                  )}
+                                </button>
+
+                                <select
+                                  className={`produccion-estado estado-${normalizarClase(
+                                    linea.estado,
+                                  )}`}
+                                  value={linea.estado}
+                                  onChange={(event) =>
+                                    cambiarEstado(
+                                      linea,
+                                      event.target.value,
+                                    )
+                                  }
+                                >
+                                  {ESTADOS.map((estado) => (
+                                    <option
+                                      key={estado}
+                                      value={estado}
+                                    >
+                                      {estado}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                <div className="produccion-linea-acciones">
+                                  <select
+                                    aria-label={`Mover ${linea.producto_nombre}`}
+                                    defaultValue=""
+                                    onChange={(event) => {
+                                      moverLinea(linea, event.target.value);
+                                      event.target.value = "";
+                                    }}
+                                  >
+                                    <option value="">↔ Mover a…</option>
+                                    {ZONAS.filter((destino) => destino !== linea.zona).map(
+                                      (destino) => (
+                                        <option key={destino} value={destino}>
+                                          {destino}
+                                        </option>
+                                      ),
+                                    )}
+                                  </select>
+
+                                  <select
+                                    aria-label={`Duplicar ${linea.producto_nombre}`}
+                                    defaultValue=""
+                                    onChange={(event) => {
+                                      duplicarLinea(linea, event.target.value);
+                                      event.target.value = "";
+                                    }}
+                                  >
+                                    <option value="">⧉ Duplicar en…</option>
+                                    {ZONAS.filter((destino) => destino !== linea.zona).map(
+                                      (destino) => (
+                                        <option key={destino} value={destino}>
+                                          {destino}
+                                        </option>
+                                      ),
+                                    )}
+                                  </select>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+                    );
+                  })}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+          </>
+        )}
+
+        <section className="zona-diaria-hoja-print">
+          <div className="zona-diaria-titulo-print">
+            <div>
+              <strong>PASTISSERIA CUSACHS</strong>
+              <h2>
+                {zonaImpresionDiaria === "Todas"
+                  ? "Producción completa"
+                  : zonaImpresionDiaria === "Obrador"
+                    ? "🥐 Producción Obrador"
+                    : "🍳 Producción Cocina"}
+              </h2>
+            </div>
+            <span>{formatearFecha(fechaSeleccionada)}</span>
+          </div>
+
+          <div className="zona-diaria-pedidos-print">
+            {pedidosAgrupados
+              .map((pedido) => ({
+                ...pedido,
+                lineasZona: pedido.lineas.filter(
+                  (linea) =>
+                    (zonaImpresionDiaria === "Todas" ||
+                      linea.zona === zonaImpresionDiaria) &&
+                    linea.estado !== "Cancelado",
+                ),
+              }))
+              .filter((pedido) => pedido.lineasZona.length > 0)
+              .map((pedido) => (
+                <article
+                  key={`print-${pedido.clave}`}
+                  className="zona-diaria-pedido-print"
+                >
+                  <div className="zona-diaria-titulo-pedido-print">
+                    <div>
+                      <strong>PASTISSERIA CUSACHS</strong>
+                      <h2>
+                        {zonaImpresionDiaria === "Todas"
+                  ? "Producción completa"
+                  : zonaImpresionDiaria === "Obrador"
+                    ? "🥐 Producción Obrador"
+                    : "🍳 Producción Cocina"}
+                      </h2>
+                    </div>
+                    <span>{formatearFecha(fechaSeleccionada)}</span>
+                  </div>
+
+                  <div className="zona-diaria-pedido-cabecera-print">
+                    <div>
+                      <strong>{pedido.cliente_nombre}</strong>
+                      <span>{pedido.pedido_nombre}</span>
+                      {pedido.hora_limite && (
+                        <span className="zona-diaria-hora-catering-print">
+                          Hora del catering: {cortarHora(pedido.hora_limite)}
+                        </span>
+                      )}
+                    </div>
+                    <span>
+                      {pedido.lineasZona.length}{" "}
+                      {pedido.lineasZona.length === 1 ? "línea" : "líneas"}
+                    </span>
+                  </div>
+
+                  <div className="zona-diaria-lineas-print">
+                    {pedido.lineasZona.map((linea) => (
+                      <div
+                        key={`print-linea-${linea.id}`}
+                        className="zona-diaria-linea-print"
+                      >
+                        <span className="zona-diaria-check-print">☐</span>
+                        <strong>
+                          {formatearCantidad(linea.cantidad)} {linea.unidad}
+                        </strong>
+                        <span>
+                          {zonaImpresionDiaria === "Todas" && (
+                            <b className="zona-diaria-zona-print">{linea.zona} · </b>
+                          )}
+                          {linea.producto_nombre}
+                        </span>
+                        {linea.observaciones && (
+                          <small>{linea.observaciones}</small>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+
+            {zonaImpresionDiaria &&
+              pedidosAgrupados.every(
+                (pedido) =>
+                  !pedido.lineas.some(
+                    (linea) =>
+                      (zonaImpresionDiaria === "Todas" ||
+                      linea.zona === zonaImpresionDiaria) &&
+                    linea.estado !== "Cancelado",
+                  ),
+              ) && (
+                <p className="zona-diaria-sin-lineas-print">
+                  No hay líneas de producción para este día.
+                </p>
+              )}
+          </div>
+        </section>
+      </section>
+
+      {modalAbierto && (
+        <div
+          className="produccion-modal-fondo"
+          onMouseDown={cerrarModal}
+        >
+          <div
+            className="produccion-modal"
+            onMouseDown={(event) =>
+              event.stopPropagation()
+            }
+          >
+            <div className="produccion-modal-cabecera">
+              <div>
+                <p className="produccion-etiqueta">
+                  PRODUCCIÓN
+                </p>
+
+                <h3>
+                  {formulario.id
+                    ? "Editar línea"
+                    : "Nueva línea"}
+                </h3>
+              </div>
+
+              <button
+                type="button"
+                className="produccion-cerrar"
+                onClick={cerrarModal}
+              >
+                ×
+              </button>
+            </div>
+
+            <form onSubmit={guardarLinea}>
+              <div className="produccion-formulario">
+                <label className="campo-produccion-ancho">
+                  Catering relacionado
+                  <select
+                    value={formulario.catering_id}
+                    onChange={(event) =>
+                      seleccionarCatering(
+                        event.target.value,
+                      )
+                    }
+                  >
+                    <option value="">
+                      Pedido manual, sin catering
+                    </option>
+
+                    {cateringsFecha.map((catering) => (
+                      <option
+                        key={catering.id}
+                        value={catering.id}
+                      >
+                        {catering.hora_inicio
+                          ? `${cortarHora(
+                              catering.hora_inicio,
+                            )} · `
+                          : ""}
+                        {catering.titulo}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Cliente *
+                  <select
+                    value={formulario.cliente_id}
+                    onChange={(event) =>
+                      seleccionarCliente(
+                        event.target.value,
+                      )
+                    }
+                  >
+                    <option value="">
+                      Seleccionar cliente
+                    </option>
+
+                    {clientes.map((cliente) => (
+                      <option
+                        key={cliente.id}
+                        value={cliente.id}
+                      >
+                        {obtenerNombreCliente(cliente)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Nombre visible del cliente *
+                  <input
+                    value={formulario.cliente_nombre}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "cliente_nombre",
+                        event.target.value,
+                      )
+                    }
+                    required
+                  />
+                </label>
+
+                <label className="campo-produccion-ancho">
+                  Nombre del pedido *
+                  <input
+                    value={formulario.pedido_nombre}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "pedido_nombre",
+                        event.target.value,
+                      )
+                    }
+                    placeholder="Ej. Coffee break Hospital Clínic"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Fecha de producción *
+                  <input
+                    type="date"
+                    value={formulario.fecha}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "fecha",
+                        event.target.value,
+                      )
+                    }
+                    required
+                  />
+                </label>
+
+                <label>
+                  Hora límite
+                  <input
+                    type="time"
+                    value={formulario.hora_limite}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "hora_limite",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+
+                <label>
+                  Zona *
+                  <select
+                    value={formulario.zona}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "zona",
+                        event.target.value,
+                      )
+                    }
+                  >
+                    {ZONAS.map((zona) => (
+                      <option key={zona} value={zona}>
+                        {zona}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Producto del catálogo
+                  <select
+                    value={formulario.producto_id}
+                    onChange={(event) =>
+                      seleccionarProducto(
+                        event.target.value,
+                      )
+                    }
+                  >
+                    <option value="">
+                      Escribir producto manualmente
+                    </option>
+
+                    {productosZona.map((producto) => (
+                      <option
+                        key={producto.id}
+                        value={producto.id}
+                      >
+                        {producto.nombre ||
+                          producto.descripcion}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="campo-produccion-ancho">
+                  Producto *
+                  <input
+                    value={formulario.producto_nombre}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "producto_nombre",
+                        event.target.value,
+                      )
+                    }
+                    required
+                  />
+                </label>
+
+                <label>
+                  Cantidad *
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={formulario.cantidad}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "cantidad",
+                        event.target.value,
+                      )
+                    }
+                    required
+                  />
+                </label>
+
+                <label>
+                  Unidad
+                  <input
+                    value={formulario.unidad}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "unidad",
+                        event.target.value,
+                      )
+                    }
+                    placeholder="unidades, bandejas, kg..."
+                  />
+                </label>
+
+                <label>
+                  Responsable
+                  <input
+                    value={formulario.responsable}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "responsable",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+
+                <label>
+                  Estado
+                  <select
+                    value={formulario.estado}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "estado",
+                        event.target.value,
+                      )
+                    }
+                  >
+                    {ESTADOS.map((estado) => (
+                      <option
+                        key={estado}
+                        value={estado}
+                      >
+                        {estado}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="campo-produccion-ancho">
+                  Dirección de entrega
+                  <input
+                    value={formulario.direccion_entrega}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "direccion_entrega",
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+
+                <label className="campo-produccion-ancho">
+                  Observaciones
+                  <textarea
+                    value={formulario.observaciones}
+                    onChange={(event) =>
+                      modificarFormulario(
+                        "observaciones",
+                        event.target.value,
+                      )
+                    }
+                    placeholder="Sin gluten, cortar en porciones, preparar en bandejas..."
+                  />
+                </label>
+              </div>
+
+              <div className="produccion-modal-acciones">
+                <button
+                  type="submit"
+                  disabled={guardando}
+                >
+                  {guardando
+                    ? "Guardando..."
+                    : "Guardar línea"}
+                </button>
+
+                <button
+                  type="button"
+                  className="boton-secundario-produccion"
+                  onClick={cerrarModal}
+                  disabled={guardando}
+                >
+                  Cancelar
+                </button>
+
+                {formulario.id && (
+                  <button
+                    type="button"
+                    className="boton-eliminar-produccion"
+                    onClick={eliminarLinea}
+                    disabled={guardando}
+                  >
+                    Eliminar
+                  </button>
+                )}
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function crearClaveProduccion({
+  catering_id,
+  producto_id,
+  producto_nombre,
+  cantidad,
+}) {
+  return [
+    String(catering_id || ""),
+    String(producto_id || ""),
+    normalizarTextoProduccion(producto_nombre),
+    Number(cantidad || 0).toFixed(4),
+  ].join("|");
+}
+
+function determinarZonaProduccion(producto, nombreProducto = "") {
+  const zonaConfigurada =
+    producto?.zona_produccion ||
+    producto?.zona ||
+    producto?.seccion ||
+    "";
+
+  const zonaNormalizada = normalizarZonaConfigurada(zonaConfigurada);
+  if (zonaNormalizada) return zonaNormalizada;
+
+  const texto = normalizarTextoProduccion(nombreProducto);
+
+  const palabrasBarra = [
+    "cafe",
+    "agua",
+    "refresco",
+    "cerveza",
+    "vino",
+    "zumo",
+    "bebida",
+    "leche",
+    "infusion",
+    "te ",
+  ];
+
+  if (palabrasBarra.some((palabra) => texto.includes(palabra))) {
+    return "Barra";
+  }
+
+  const palabrasCocina = [
+    "tortilla",
+    "brocheta",
+    "croqueta",
+    "hamburguesa",
+    "quiche",
+    "ensalada",
+    "carne",
+    "pollo",
+    "pescado",
+    "verdura",
+    "arroz",
+    "pasta",
+    "salsa",
+    "caliente",
+  ];
+
+  if (palabrasCocina.some((palabra) => texto.includes(palabra))) {
+    return "Cocina";
+  }
+
+  return "Obrador";
+}
+
+function normalizarZonaConfigurada(zona) {
+  const valor = normalizarTextoProduccion(zona);
+  if (valor === "obrador") return "Obrador";
+  if (valor === "cocina") return "Cocina";
+  if (valor === "barra") return "Barra";
+  return "";
+}
+
+function normalizarTextoProduccion(valor) {
+  return String(valor || "")
+    .trim()
+    .toLocaleLowerCase("es-ES")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function obtenerNombreCliente(cliente) {
+  if (!cliente) return "";
+
+  if (cliente.empresa && cliente.nombre) {
+    return `${cliente.empresa} — ${cliente.nombre}`;
+  }
+
+  return cliente.empresa || cliente.nombre || "";
+}
+
+function obtenerFechaISO(fecha) {
+  const año = fecha.getFullYear();
+
+  const mes = String(fecha.getMonth() + 1).padStart(
+    2,
+    "0",
+  );
+
+  const dia = String(fecha.getDate()).padStart(2, "0");
+
+  return `${año}-${mes}-${dia}`;
+}
+
+function obtenerDiaAnterior(fechaTexto) {
+  if (!fechaTexto) return "";
+
+  const fecha = new Date(`${fechaTexto}T12:00:00`);
+  fecha.setDate(fecha.getDate() - 1);
+
+  return obtenerFechaISO(fecha);
+}
+
+function formatearFecha(fechaTexto) {
+  if (!fechaTexto) return "";
+
+  return new Intl.DateTimeFormat("es-ES", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(new Date(`${fechaTexto}T12:00:00`));
+}
+
+function cortarHora(hora) {
+  return hora ? String(hora).slice(0, 5) : "";
+}
+
+function formatearCantidad(cantidad) {
+  const numero = Number(cantidad || 0);
+
+  return numero.toLocaleString("es-ES", {
+    maximumFractionDigits: 2,
+  });
+}
+
+function normalizarClase(texto) {
+  return String(texto || "pendiente")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "-");
+}
+
+function obtenerIconoZona(zona) {
+  if (zona === "Obrador") return "🥐";
+  if (zona === "Cocina") return "🍳";
+  if (zona === "Barra") return "☕";
+
+  return "✓";
+}
+
+const ESTILOS_PRODUCCION = `
+  .produccion-panel {
+    padding: 28px;
+  }
+
+  .produccion-totales-productos {
+    margin: 0 0 22px;
+    padding: 20px;
+    border: 1px solid #d8cae0;
+    border-radius: 16px;
+    background: #fbf8fc;
+  }
+
+  .produccion-totales-cabecera {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 15px;
+  }
+
+  .produccion-totales-cabecera h3 { margin: 0; font-size: 22px; }
+  .produccion-totales-cabecera > span { color: #6c6072; font-weight: 700; text-transform: capitalize; }
+  .produccion-totales-cabecera small { color: #6c6072; font-weight: 800; }
+  .produccion-totales-acciones { display: flex; align-items: flex-end; flex-direction: column; gap: 10px; }
+  .produccion-totales-acciones span { color: #6c6072; font-weight: 700; text-transform: capitalize; }
+  .produccion-totales-tabla-contenedor { overflow-x: auto; }
+  .produccion-totales-tabla { width: 100%; min-width: 850px; border-collapse: collapse; background: #fff; }
+  .produccion-totales-tabla th,
+  .produccion-totales-tabla td { padding: 11px 10px; border: 1px solid #e2d9e7; text-align: center; }
+  .produccion-totales-tabla thead th { background: #eee3f3; color: #542168; text-transform: capitalize; }
+  .produccion-totales-tabla tbody th { min-width: 220px; text-align: left; color: #302738; }
+  .produccion-totales-tabla tbody th small { display: block; margin-top: 3px; color: #827788; font-weight: 600; }
+  .produccion-totales-tabla td.dia-seleccionado { background: #e7f2ff; color: #155493; font-weight: 900; }
+  .produccion-totales-tabla td.total-semana { background: #fff0ad; color: #6c5100; font-size: 17px; font-weight: 900; }
+  .produccion-totales-vacio { margin: 0; color: #827788; }
+  .produccion-totales-lista-print { display: none; }
+
+  .produccion-cabecera,
+  .produccion-fecha-barra,
+  .produccion-pedido-cabecera,
+  .produccion-zona-cabecera,
+  .produccion-modal-cabecera,
+  .produccion-modal-acciones {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .produccion-cabecera h2,
+  .produccion-pedido h3,
+  .produccion-modal h3 {
+    margin: 0;
+  }
+
+  .produccion-pedido-acciones {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .boton-abrir-presupuesto {
+    border: 1px solid #6f2384;
+    border-radius: 12px;
+    background: #6f2384;
+    color: #ffffff;
+    padding: 10px 14px;
+    font-weight: 800;
+    cursor: pointer;
+  }
+
+  .boton-abrir-presupuesto:hover {
+    background: #50135f;
+  }
+
+  .produccion-etiqueta {
+    margin: 0 0 6px;
+    color: #7837a1;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 2px;
+  }
+
+  .produccion-descripcion {
+    margin: 7px 0 0;
+    color: #756d7a;
+  }
+
+  .produccion-acciones-cabecera {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .produccion-fecha-barra {
+    margin: 24px 0 18px;
+    padding: 15px;
+    border: 1px solid #ded5e3;
+    border-radius: 14px;
+    background: #faf8fb;
+  }
+
+  .produccion-navegacion {
+    display: flex;
+    gap: 8px;
+  }
+
+  .boton-secundario-produccion {
+    border: 1px solid #cbbbd4;
+    background: #ffffff;
+    color: #642a87;
+  }
+
+  .produccion-selector-fecha {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 800;
+  }
+
+  .produccion-selector-fecha input {
+    padding: 9px;
+    border: 1px solid #cec4d3;
+    border-radius: 9px;
+  }
+
+  .produccion-fecha-texto {
+    color: #642a87;
+    font-size: 17px;
+    font-weight: 900;
+    text-transform: capitalize;
+  }
+
+  .produccion-resumen {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(130px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .produccion-resumen-tarjeta {
+    padding: 15px;
+    border: 1px solid #ded5e3;
+    border-radius: 13px;
+    background: #ffffff;
+  }
+
+  .produccion-resumen-tarjeta span {
+    display: block;
+    color: #756d7a;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .produccion-resumen-tarjeta strong {
+    display: block;
+    margin-top: 5px;
+    color: #302738;
+    font-size: 25px;
+  }
+
+  .produccion-resumen-tarjeta.pendiente {
+    background: #fff8df;
+  }
+
+  .produccion-resumen-tarjeta.preparacion {
+    background: #e7f2ff;
+  }
+
+  .produccion-resumen-tarjeta.terminado {
+    background: #e5f7ec;
+  }
+
+  .produccion-error,
+  .produccion-mensaje,
+  .produccion-cargando {
+    margin-bottom: 16px;
+    padding: 13px 15px;
+    border-radius: 10px;
+  }
+
+  .produccion-error {
+    background: #fde9ed;
+    color: #a52d43;
+  }
+
+  .produccion-mensaje {
+    background: #e5f7ec;
+    color: #256b41;
+  }
+
+  .produccion-cargando {
+    background: #f3eff5;
+    color: #625968;
+  }
+
+  .produccion-vacia {
+    padding: 55px 20px;
+    border: 1px dashed #cbbfd1;
+    border-radius: 17px;
+    background: #faf8fb;
+    text-align: center;
+  }
+
+  .produccion-vacia-icono {
+    display: flex;
+    width: 56px;
+    height: 56px;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 15px;
+    border-radius: 50%;
+    background: #eee2f5;
+    color: #713397;
+    font-size: 27px;
+    font-weight: 900;
+  }
+
+  .produccion-vacia h3 {
+    margin: 0 0 8px;
+  }
+
+  .produccion-vacia p {
+    margin: 0 0 18px;
+    color: #756d7a;
+  }
+
+  .produccion-pedidos {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .produccion-pedido {
+    overflow: hidden;
+    border: 1px solid #dcd2e1;
+    border-radius: 17px;
+    background: #ffffff;
+    box-shadow: 0 8px 25px rgba(55, 31, 70, 0.07);
+  }
+
+  .produccion-pedido-cabecera {
+    padding: 18px 20px;
+    background: linear-gradient(
+      135deg,
+      #f4eaf8,
+      #ffffff
+    );
+  }
+
+  .produccion-cliente {
+    margin: 0 0 5px;
+    color: #713397;
+    font-size: 14px;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .produccion-pedido h3 {
+    font-size: 23px;
+  }
+
+  .produccion-datos-pedido {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 13px;
+    margin-top: 8px;
+    color: #665d6b;
+    font-size: 14px;
+  }
+
+  .produccion-numero-lineas {
+    padding: 8px 12px;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #642a87;
+    font-weight: 800;
+  }
+
+  .produccion-zonas {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0;
+  }
+
+  .produccion-zona {
+    min-height: 180px;
+    padding: 16px;
+    border-top: 1px solid #e5dee8;
+    border-right: 1px solid #e5dee8;
+  }
+
+  .produccion-zona:last-child {
+    border-right: 0;
+  }
+
+  .produccion-zona-cabecera h4 {
+    margin: 0;
+    font-size: 17px;
+  }
+
+  .boton-anadir-zona {
+    width: 34px;
+    min-height: 34px;
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  .produccion-zona-vacia {
+    margin: 25px 0;
+    color: #9b929f;
+    text-align: center;
+  }
+
+  .produccion-lineas {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    margin-top: 13px;
+  }
+
+  .produccion-linea {
+    overflow: hidden;
+    border: 1px solid #ded5e3;
+    border-left: 5px solid #d5a72e;
+    border-radius: 11px;
+    background: #ffffff;
+  }
+
+  .produccion-linea.linea-en-preparacion {
+    border-left-color: #3484c5;
+  }
+
+  .produccion-linea.linea-terminado {
+    border-left-color: #3a9d60;
+  }
+
+  .produccion-linea.linea-cancelado {
+    border-left-color: #bd4054;
+    opacity: 0.72;
+  }
+
+  .produccion-producto {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 11px;
+    border: 0;
+    border-radius: 0;
+    background: #ffffff;
+    color: #302738;
+    text-align: left;
+    box-shadow: none;
+  }
+
+  .produccion-producto:hover {
+    background: #faf7fc;
+    color: #302738;
+    transform: none;
+  }
+
+  .produccion-producto span {
+    color: #713397;
+    font-weight: 900;
+  }
+
+  .produccion-producto small {
+    color: #756d7a;
+  }
+
+  .produccion-estado {
+    width: calc(100% - 16px);
+    margin: 0 8px 8px;
+    padding: 7px;
+    border: 1px solid #d4cad9;
+    border-radius: 8px;
+    font-weight: 700;
+  }
+
+  .produccion-linea-acciones {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 0 8px 8px;
+  }
+
+  .produccion-linea-acciones select {
+    min-width: 0;
+    width: 100%;
+    padding: 7px 6px;
+    border: 1px solid #cbbbd4;
+    border-radius: 8px;
+    background: #f7f1fa;
+    color: #642a87;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+  }
+
+  .estado-pendiente {
+    background: #fff8df;
+  }
+
+  .estado-en-preparacion {
+    background: #e7f2ff;
+  }
+
+  .estado-terminado {
+    background: #e5f7ec;
+  }
+
+  .estado-cancelado {
+    background: #fde9ed;
+  }
+
+  .produccion-modal-fondo {
+    position: fixed;
+    z-index: 1000;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(31, 20, 37, 0.62);
+  }
+
+  .produccion-modal {
+    width: min(970px, 100%);
+    max-height: 92vh;
+    overflow-y: auto;
+    padding: 26px;
+    border-radius: 20px;
+    background: #ffffff;
+    box-shadow: 0 25px 70px rgba(25, 12, 34, 0.3);
+  }
+
+  .produccion-cerrar {
+    width: 43px;
+    min-height: 43px;
+    padding: 0;
+    border: 1px solid #d1c7d6;
+    background: #ffffff;
+    color: #4d4451;
+    font-size: 25px;
+  }
+
+  .produccion-formulario {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  .produccion-formulario label {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    font-weight: 800;
+  }
+
+  .produccion-formulario input,
+  .produccion-formulario select,
+  .produccion-formulario textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 11px;
+    border: 1px solid #cfc5d4;
+    border-radius: 9px;
+    font: inherit;
+  }
+
+  .produccion-formulario textarea {
+    min-height: 100px;
+    resize: vertical;
+  }
+
+  .campo-produccion-ancho {
+    grid-column: 1 / -1;
+  }
+
+  .produccion-modal-acciones {
+    justify-content: flex-start;
+    margin-top: 22px;
+  }
+
+  .boton-eliminar-produccion {
+    margin-left: auto;
+    background: #bb334b;
+  }
+
+  .produccion-impresion-diaria {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .zona-diaria-hoja-print {
+    display: none;
+  }
+
+  .zona-diaria-titulo-print {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 20px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #2f2932;
+  }
+
+  .zona-diaria-titulo-print strong {
+    font-size: 12px;
+    letter-spacing: 1.5px;
+  }
+
+  .zona-diaria-titulo-print h2 {
+    margin: 4px 0 0;
+    font-size: 25px;
+  }
+
+  .zona-diaria-titulo-print > span {
+    font-size: 15px;
+    font-weight: 800;
+    text-transform: capitalize;
+  }
+
+  .zona-diaria-pedidos-print {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-top: 14px;
+  }
+
+  .zona-diaria-pedido-print {
+    break-inside: avoid;
+    border: 1px solid #aaa;
+  }
+
+  .zona-diaria-titulo-pedido-print {
+    display: none;
+  }
+
+  .zona-diaria-pedido-cabecera-print {
+    display: flex;
+    justify-content: space-between;
+    gap: 15px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #aaa;
+  }
+
+  .zona-diaria-pedido-cabecera-print strong,
+  .zona-diaria-pedido-cabecera-print span {
+    display: block;
+  }
+
+  .zona-diaria-pedido-cabecera-print strong {
+    font-size: 15px;
+  }
+
+  .zona-diaria-pedido-cabecera-print div span {
+    margin-top: 2px;
+    font-size: 12px;
+  }
+
+  .zona-diaria-pedido-cabecera-print .zona-diaria-hora-catering-print {
+    margin-top: 5px;
+    font-size: 14px;
+    font-weight: 800;
+  }
+
+  .zona-diaria-lineas-print {
+    padding: 5px 10px;
+  }
+
+  .zona-diaria-linea-print {
+    display: grid;
+    grid-template-columns: 24px 110px 1fr;
+    gap: 8px;
+    align-items: baseline;
+    padding: 7px 0;
+    border-bottom: 1px solid #ddd;
+    font-size: 14px;
+  }
+
+  .zona-diaria-linea-print:last-child {
+    border-bottom: 0;
+  }
+
+  .zona-diaria-linea-print small {
+    grid-column: 3;
+    font-size: 11px;
+  }
+
+  .zona-diaria-check-print {
+    font-size: 17px;
+  }
+
+  .zona-diaria-sin-lineas-print {
+    padding: 25px;
+    text-align: center;
+  }
+
+  .barra-semanal-panel {
+    margin-top: 22px;
+  }
+
+  .barra-semanal-cabecera,
+  .barra-semanal-titulo-print {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+  }
+
+  .barra-semanal-cabecera {
+    margin-bottom: 16px;
+  }
+
+  .barra-semanal-cabecera h3,
+  .barra-semanal-titulo-print h2 {
+    margin: 0;
+  }
+
+  .barra-semanal-cabecera p {
+    margin: 6px 0 0;
+    color: #756d7a;
+  }
+
+  .barra-semanal-acciones {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .barra-semanal-hoja {
+    overflow: hidden;
+    border: 1px solid #d8cedd;
+    border-radius: 16px;
+    background: #ffffff;
+  }
+
+  .barra-semanal-titulo-print {
+    padding: 16px 18px;
+    border-bottom: 1px solid #d8cedd;
+    background: #f7f1fa;
+  }
+
+  .barra-semanal-titulo-print strong {
+    color: #713397;
+    font-size: 12px;
+    letter-spacing: 1.5px;
+  }
+
+  .barra-semanal-titulo-print span {
+    font-weight: 900;
+  }
+
+  .barra-semanal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+
+  .barra-semanal-dia {
+    min-height: 420px;
+    border-right: 1px solid #ded5e3;
+  }
+
+  .barra-semanal-dia:last-child {
+    border-right: 0;
+  }
+
+  .barra-semanal-dia-cabecera {
+    padding: 11px 8px;
+    border-bottom: 1px solid #ded5e3;
+    background: #f0f3ef;
+    text-align: center;
+    text-transform: capitalize;
+  }
+
+  .barra-semanal-dia-cabecera strong {
+    font-size: 16px;
+  }
+
+  .barra-semanal-dia-cabecera strong,
+  .barra-semanal-dia-cabecera span {
+    display: block;
+  }
+
+  .barra-semanal-dia-cabecera span {
+    margin-top: 3px;
+    font-size: 14px;
+  }
+
+  .barra-semanal-vacio {
+    padding: 28px 8px;
+    color: #9b929f;
+    font-size: 13px;
+    text-align: center;
+  }
+
+  .barra-semanal-pedido {
+    padding: 9px 8px;
+    border-bottom: 1px solid #ece5ef;
+  }
+
+  .barra-semanal-pedido-cabecera {
+    margin-bottom: 7px;
+  }
+
+  .barra-semanal-pedido-cabecera strong,
+  .barra-semanal-pedido-cabecera span {
+    display: block;
+  }
+
+  .barra-semanal-pedido-cabecera strong {
+    color: #642a87;
+    font-size: 14px;
+  }
+
+  .barra-semanal-pedido-cabecera span {
+    margin-top: 2px;
+    font-size: 12px;
+    color: #756d7a;
+  }
+
+  .barra-semanal-lineas {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .barra-semanal-linea {
+    display: grid;
+    grid-template-columns: 20px 36px 1fr;
+    gap: 5px;
+    align-items: start;
+    font-size: 13px;
+    line-height: 1.3;
+  }
+
+  .barra-check {
+    font-size: 17px;
+  }
+
+  .barra-cantidad {
+    font-weight: 900;
+    text-align: right;
+  }
+
+  .barra-producto {
+    overflow-wrap: anywhere;
+  }
+
+  @media print {
+    body.imprimiendo-resumen-productos * {
+      visibility: hidden !important;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-productos,
+    body.imprimiendo-resumen-productos .produccion-totales-productos * {
+      visibility: visible !important;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-productos {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: #ffffff;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-acciones button {
+      display: none !important;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-tabla-contenedor {
+      display: block !important;
+      overflow: visible;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-lista-print {
+      display: none !important;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-tabla {
+      width: 100%;
+      min-width: 0;
+      table-layout: fixed;
+      font-size: 8px;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-tabla th,
+    body.imprimiendo-resumen-productos .produccion-totales-tabla td {
+      padding: 4px 2px;
+      overflow-wrap: anywhere;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-tabla thead th:first-child,
+    body.imprimiendo-resumen-productos .produccion-totales-tabla tbody th {
+      width: 27%;
+      min-width: 0;
+      text-align: left;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-tabla tbody tr {
+      break-inside: avoid;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-lista-print article {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 4px 10px;
+      padding: 8px 10px;
+      border: 1px solid #bdb6c1;
+      break-inside: avoid;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-lista-print article > div {
+      min-width: 0;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-lista-print strong {
+      display: block;
+      font-size: 12px;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-lista-print small {
+      display: block;
+      color: #666;
+      font-size: 9px;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-lista-print p {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px 12px;
+      margin: 0;
+      font-size: 10px;
+    }
+
+    body.imprimiendo-resumen-productos .produccion-totales-lista-print em {
+      grid-column: 2;
+      grid-row: 1;
+      align-self: center;
+      color: #542168;
+      font-size: 11px;
+      font-style: normal;
+      white-space: nowrap;
+    }
+
+    @page {
+      size: A4 portrait;
+      margin: 10mm;
+    }
+  }
+
+  @media print {
+    body.imprimiendo-zona-diaria * {
+      visibility: hidden !important;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-hoja-print,
+    body.imprimiendo-zona-diaria .zona-diaria-hoja-print * {
+      visibility: visible !important;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-hoja-print {
+      display: block !important;
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      padding: 0;
+      background: #ffffff;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-titulo-print {
+      display: none;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-pedidos-print {
+      display: block;
+      padding-top: 0;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-pedido-print {
+      display: block;
+      width: 100%;
+      min-height: 0;
+      margin: 0;
+      page-break-inside: avoid;
+      break-inside: avoid-page;
+      page-break-after: always;
+      break-after: page;
+      border: 0;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-pedido-print:last-child {
+      page-break-after: auto;
+      break-after: auto;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-titulo-pedido-print {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid #2f2932;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-titulo-pedido-print strong {
+      font-size: 13px;
+      letter-spacing: 1.5px;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-titulo-pedido-print h2 {
+      margin: 4px 0 0;
+      font-size: 27px;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-titulo-pedido-print > span {
+      font-size: 17px;
+      font-weight: 800;
+      text-transform: capitalize;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-pedido-cabecera-print {
+      margin-top: 12px;
+      padding: 11px 12px;
+      border: 1px solid #999;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-pedido-cabecera-print strong {
+      font-size: 19px;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-pedido-cabecera-print div span {
+      font-size: 15px;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-pedido-cabecera-print .zona-diaria-hora-catering-print {
+      font-size: 17px;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-lineas-print {
+      padding: 6px 12px;
+      border: 1px solid #999;
+      border-top: 0;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-linea-print {
+      grid-template-columns: 26px 130px 1fr;
+      gap: 10px;
+      padding: 9px 0;
+      font-size: 17px;
+      line-height: 1.25;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-linea-print small {
+      font-size: 14px;
+    }
+
+    body.imprimiendo-zona-diaria .zona-diaria-check-print {
+      font-size: 20px;
+    }
+
+    @page {
+      size: A4 portrait;
+      margin: 10mm;
+    }
+  }
+
+  @media print {
+    body.imprimiendo-barra-semanal * {
+      visibility: hidden !important;
+    }
+
+    body.imprimiendo-barra-semanal .barra-semanal-hoja,
+    body.imprimiendo-barra-semanal .barra-semanal-hoja * {
+      visibility: visible !important;
+    }
+
+    body.imprimiendo-barra-semanal .barra-semanal-hoja {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: auto;
+      border: 0;
+      border-radius: 0;
+    }
+
+    body.imprimiendo-barra-semanal .barra-semanal-grid {
+      grid-template-columns: repeat(7, 1fr);
+    }
+
+    body.imprimiendo-barra-semanal .barra-semanal-dia {
+      min-height: 0;
+    }
+
+    @page {
+      size: A4 landscape;
+      margin: 8mm;
+    }
+  }
+
+  @media (max-width: 1100px) {
+    .produccion-resumen {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    .produccion-zonas {
+      grid-template-columns: 1fr;
+    }
+
+    .produccion-zona {
+      border-right: 0;
+    }
+  }
+
+  @media (max-width: 750px) {
+    .produccion-cabecera,
+    .produccion-fecha-barra,
+    .produccion-pedido-cabecera {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .produccion-acciones-cabecera {
+      flex-direction: column;
+    }
+
+    .produccion-acciones-cabecera button {
+      width: 100%;
+    }
+
+    .produccion-resumen {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .produccion-formulario {
+      grid-template-columns: 1fr;
+    }
+
+    .campo-produccion-ancho {
+      grid-column: auto;
+    }
+
+    .produccion-modal-acciones {
+      flex-direction: column;
+    }
+
+    .produccion-modal-acciones button {
+      width: 100%;
+    }
+
+    .boton-eliminar-produccion {
+      margin-left: 0;
+    }
+
+    .produccion-linea-acciones {
+      grid-template-columns: 1fr;
+    }
+  }
+`;
+
+export default Produccion;

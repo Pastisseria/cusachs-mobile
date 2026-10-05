@@ -1,0 +1,26 @@
+.mobile-header,.mobile-nav{display:none}
+
+@media (max-width: 760px){
+  body{padding-bottom:78px;background:#f6f3f7}
+  .app-mobile{display:block;min-height:100vh}
+  .app-mobile>.sidebar{position:fixed;z-index:1200}
+  .app-mobile .contenido{padding:78px 12px 92px;width:100%;overflow-x:hidden}
+  .mobile-header{display:flex;position:fixed;z-index:1000;top:0;left:0;right:0;height:64px;align-items:center;gap:14px;padding:8px 14px;background:#fff;border-bottom:1px solid #e5dce9;box-shadow:0 3px 14px rgba(40,0,53,.08)}
+  .mobile-header .boton-menu-tablet{display:inline-flex;position:static;width:46px;height:46px;min-height:46px;padding:0;border-radius:14px;font-size:23px}
+  .mobile-header>div{display:flex;flex-direction:column;line-height:1.05}
+  .mobile-header strong{font-size:19px;color:#280035;letter-spacing:.7px}
+  .mobile-header span{font-size:12px;color:#716a76;margin-top:4px}
+  .mobile-nav{display:grid;grid-template-columns:repeat(4,1fr);position:fixed;z-index:1100;left:0;right:0;bottom:0;padding:7px 6px calc(7px + env(safe-area-inset-bottom));background:#fff;border-top:1px solid #e1d7e5;box-shadow:0 -4px 18px rgba(40,0,53,.09)}
+  .mobile-nav-item{display:flex;min-width:0;min-height:58px;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:5px 2px;border-radius:12px;color:#716a76;text-decoration:none;font-size:10.5px;font-weight:700;text-align:center}
+  .mobile-nav-item.active{background:#f2eaf4;color:#280035}
+  .mobile-nav-icon{font-size:22px;line-height:1}
+  .app-mobile .panel{padding:16px;border-radius:16px}
+  .app-mobile .cabecera h1{font-size:30px}
+  .app-mobile .cabecera>p:last-child{font-size:15px}
+  .app-mobile button,.app-mobile .boton{min-height:48px}
+  .app-mobile input,.app-mobile select,.app-mobile textarea{font-size:16px}
+  .app-mobile .rejilla-formulario{grid-template-columns:1fr}
+  .app-mobile .fila-formulario{flex-direction:column;align-items:stretch}
+  .app-mobile .titulo-seccion{flex-direction:column}
+  .app-mobile table{font-size:13px}
+}

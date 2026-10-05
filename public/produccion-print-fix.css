@@ -1,0 +1,56 @@
+/* Producción Cusachs: A4 vertical, un cliente/pedido por hoja */
+@media print {
+  body.imprimiendo-zona-diaria .zona-diaria-hoja-print,
+  body.imprimiendo-zona-diaria .zona-diaria-pedido-print {
+    page: produccion-a4 !important;
+  }
+
+  body.imprimiendo-zona-diaria .zona-diaria-pedido-print {
+    display: block !important;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    break-inside: avoid-page !important;
+    page-break-inside: avoid !important;
+    break-after: page !important;
+    page-break-after: always !important;
+  }
+
+  body.imprimiendo-zona-diaria .zona-diaria-pedido-print:last-child {
+    break-after: auto !important;
+    page-break-after: auto !important;
+  }
+
+  body.imprimiendo-zona-diaria .zona-diaria-linea-print small {
+    display: none !important;
+  }
+
+  body.imprimiendo-zona-diaria .zona-diaria-titulo-pedido-print h2 {
+    font-size: 20px !important;
+    line-height: 1.05 !important;
+  }
+
+  body.imprimiendo-zona-diaria .zona-diaria-pedido-cabecera-print strong {
+    font-size: 14px !important;
+    line-height: 1.1 !important;
+    white-space: normal !important;
+    overflow: visible !important;
+  }
+
+  /* Productos a 18px */
+  body.imprimiendo-zona-diaria .zona-diaria-linea-print,
+  body.imprimiendo-zona-diaria .zona-diaria-linea-print strong {
+    font-size: 18px !important;
+    line-height: 1.08 !important;
+  }
+
+  body.imprimiendo-zona-diaria .zona-diaria-linea-print {
+    padding: 3px 0 !important;
+  }
+}
+
+@page produccion-a4 {
+  size: A4 portrait;
+  margin: 8mm;
+}

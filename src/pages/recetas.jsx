@@ -1,0 +1,492 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  BookOpen, ChefHat, Croissant, Edit3, Loader2, Plus, Save,
+  Search, Trash2, X, AlertCircle, Calculator, Package, Printer,
+} from 'lucide-react';
+import { supabase } from '../supabase.js';
+import '../styles/recetas.css';
+
+const EMPTY_RECIPE = {
+  name: '', area: 'obrador', description: '', yield_quantity: 1,
+  yield_unit: 'unidades', process: '', product_id: '', cost_sheet_id: '', active: true,
+  allergens: [],
+  production_sheet: {
+    elaboration_date: '', product_code: '', production_control: '', cooking_control: '',
+    cooling_control: '', conservation_control: '', packaging_format: '',
+    packaging_units: '', packaging_method: '', packaging_other: '', final_production: '',
+    label_product: '', lot_date: '', expiry_date: '',
+  },
+};
+
+const EMPTY_ITEM = {
+  name: '', quantity: 0, unit: 'g', unit_cost: 0,
+  source_type: 'manual', source_id: '', notes: '', sort_order: 0,
+};
+
+const UNITS = ['g', 'kg', 'ml', 'l', 'unidad', 'docena', 'ración'];
+
+const ALLERGENS = [
+  ['gluten', 'Gluten'], ['crustaceos', 'Crustáceos'], ['huevos', 'Huevos'],
+  ['pescado', 'Pescado'], ['cacahuetes', 'Cacahuetes'], ['soja', 'Soja'],
+  ['leche', 'Leche'], ['frutos_de_cascara', 'Frutos de cáscara'], ['apio', 'Apio'],
+  ['mostaza', 'Mostaza'], ['sesamo', 'Sésamo'], ['sulfitos', 'Sulfitos'],
+  ['altramuces', 'Altramuces'], ['moluscos', 'Moluscos'],
+];
+
+const money = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' });
+const number = new Intl.NumberFormat('es-ES', { maximumFractionDigits: 3 });
+
+function normalizedCost(item) {
+  const quantity = Number(item.quantity) || 0;
+  const unitCost = Number(item.unit_cost) || 0;
+  return quantity * unitCost;
+}
+
+function sourceRecipeUnitCost(sourceRecipe, targetUnit) {
+  if (!sourceRecipe) return 0;
+  const total = (sourceRecipe.recipe_ingredients || []).reduce(
+    (sum, item) => sum + normalizedCost(item), 0,
+  );
+  const sourceUnit = String(sourceRecipe.yield_unit || '').toLowerCase();
+  const unit = String(targetUnit || sourceUnit).toLowerCase();
+  const costPerSourceUnit = total / Math.max(Number(sourceRecipe.yield_quantity) || 1, 1);
+  if (sourceUnit === 'kg' && unit === 'g') return costPerSourceUnit / 1000;
+  if (sourceUnit === 'g' && unit === 'kg') return costPerSourceUnit * 1000;
+  if (sourceUnit === 'l' && unit === 'ml') return costPerSourceUnit / 1000;
+  if (sourceUnit === 'ml' && unit === 'l') return costPerSourceUnit * 1000;
+  return costPerSourceUnit;
+}
+
+const normalizeName = (value) => String(value || '').trim().toLocaleLowerCase('es');
+const recipeUnitFromCatalog = (unit) => unit === 'ud.' ? 'unidad' : unit;
+
+function catalogUnitCost(ingredient, targetUnit) {
+  if (!ingredient) return 0;
+  const sourceUnit = recipeUnitFromCatalog(String(ingredient.unidad || '').toLowerCase());
+  const unit = String(targetUnit || sourceUnit).toLowerCase();
+  const cost = Number(ingredient.precio_coste) || 0;
+  if (sourceUnit === 'kg' && unit === 'g') return cost / 1000;
+  if (sourceUnit === 'g' && unit === 'kg') return cost * 1000;
+  if (sourceUnit === 'l' && unit === 'ml') return cost / 1000;
+  if (sourceUnit === 'ml' && unit === 'l') return cost * 1000;
+  return cost;
+}
+
+const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character]);
+const printableText = (value) => escapeHtml(value || '—').replace(/\n/g, '<br>');
+
+function printProductionSheet(recipe) {
+  const sheet = recipe.production_sheet || {};
+  const ingredients = (recipe.recipe_ingredients || [])
+    .map((item, index) => `<tr><td>${index + 1}. ${escapeHtml(item.name)}</td><td>${escapeHtml(`${number.format(item.quantity)} ${item.unit}`)}</td></tr>`)
+    .join('');
+  const allergens = (recipe.allergens || [])
+    .map((value) => ALLERGENS.find(([key]) => key === value)?.[1] || value)
+    .join(', ') || 'No indicats';
+
+  // Abrimos la pestaña directamente desde el clic del usuario. En Chrome/GitHub Pages,
+  // usar noopener/noreferrer en window.open puede devolver null y dejar una pestaña en blanco.
+  const popup = window.open('', '_blank');
+  if (!popup) {
+    window.alert('El navegador ha bloqueado la ficha PDF. Permite las ventanas emergentes para Cusachs Hub y vuelve a pulsar “Fitxa PDF”.');
+    return;
+  }
+
+  try {
+    popup.opener = null;
+  } catch {
+    // Algunos navegadores no permiten modificar opener; no impide generar la ficha.
+  }
+
+  const html = `<!doctype html><html lang="ca"><head><meta charset="utf-8"><title>Fitxa de producció - ${escapeHtml(recipe.name)}</title><style>@page{size:A4;margin:10mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;margin:0;font-size:11px}h1{font-size:20px;text-align:center;margin:0 0 10px}.row{display:grid;grid-template-columns:1fr 1fr;border:1px solid #222}.row div,.field{padding:7px;border-right:1px solid #222}.row div:last-child{border:0}.section{border:1px solid #222;border-top:0}.section h2{font-size:12px;background:#e8e8e8;margin:0;padding:5px 7px;text-transform:uppercase}.section .content{min-height:45px;padding:7px;line-height:1.35}.section.tall .content{min-height:75px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #222;padding:5px;text-align:left}th{background:#eee}.label{font-weight:700}.allergens{width:42%}.meta{margin-top:8px;display:grid;grid-template-columns:1fr 1fr;border:1px solid #222}.meta div{padding:6px;border-right:1px solid #222}.meta div:last-child{border:0}@media print{button{display:none}}</style></head><body><h1>FITXA DE PRODUCCIÓ</h1><div class="row"><div><span class="label">PRODUCTE:</span> ${escapeHtml(recipe.name)}</div><div><span class="label">Codi producte:</span> ${escapeHtml(sheet.product_code || '—')}</div></div><div class="row"><div><span class="label">Data elaboració:</span> ${escapeHtml(sheet.elaboration_date || sheet.lot_date || '—')}</div><div><span class="label">Secció:</span> ${escapeHtml(recipe.area)}</div></div><table><thead><tr><th>INGREDIENTS</th><th>QUANTITAT</th><th class="allergens">Informació sobre al·lèrgens per al consumidor final</th></tr></thead><tbody>${ingredients || '<tr><td>—</td><td>—</td><td>—</td></tr>'}<tr><td colspan="2"></td><td rowspan="1">${escapeHtml(allergens)}</td></tr></tbody></table>${[['PROCÉS ELABORACIÓ',recipe.process],['CONTROL DE PRODUCCIÓ',sheet.production_control],['CONTROL DE COCCIÓ',sheet.cooking_control],['CONTROL REFREDAMENT',sheet.cooling_control],['CONTROL DE CONSERVACIÓ',sheet.conservation_control]].map(([title,value])=>`<section class="section tall"><h2>${title}</h2><div class="content">${printableText(value)}</div></section>`).join('')}<section class="section"><h2>ENVASAMENT</h2><div class="content"><b>Format envàs:</b> ${escapeHtml(sheet.packaging_format || '—')} &nbsp;&nbsp; <b>Unitats per envàs:</b> ${escapeHtml(sheet.packaging_units || '—')}<br><b>Mètode:</b> ${escapeHtml(sheet.packaging_method || '—')} ${escapeHtml(sheet.packaging_other || '')}</div></section><section class="section"><h2>PRODUCCIÓ FINAL</h2><div class="content"><b>Peces o Kg de producte en total:</b> ${escapeHtml(sheet.final_production || `${recipe.yield_quantity} ${recipe.yield_unit}`)}</div></section><section class="section"><h2>ETIQUETATGE</h2><div class="content"><b>PRODUCTE:</b> ${escapeHtml(sheet.label_product || recipe.name)}<br><b>Data d'elaboració (LOT):</b> ${escapeHtml(sheet.lot_date || sheet.elaboration_date || '—')}<br><b>Data de caducitat:</b> ${escapeHtml(sheet.expiry_date || '—')}</div></section></body></html>`;
+
+  popup.document.open();
+  popup.document.write(html);
+  popup.document.close();
+  popup.focus();
+
+  const launchPrint = () => {
+    window.setTimeout(() => {
+      try {
+        popup.focus();
+        popup.print();
+      } catch (printError) {
+        console.error('No se ha podido abrir la impresión de la ficha:', printError);
+      }
+    }, 250);
+  };
+
+  if (popup.document.readyState === 'complete') launchPrint();
+  else popup.addEventListener('load', launchPrint, { once: true });
+}
+
+function RecipeForm({ initial, availableRecipes, availableIngredients, onCancel, onSaved }) {
+  const [recipe, setRecipe] = useState(initial?.recipe ? {
+    ...EMPTY_RECIPE, ...initial.recipe,
+    production_sheet: { ...EMPTY_RECIPE.production_sheet, ...(initial.recipe.production_sheet || {}) },
+  } : EMPTY_RECIPE);
+  const [items, setItems] = useState(initial?.items?.length ? initial.items : [{ ...EMPTY_ITEM }]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const totalCost = useMemo(() => items.reduce((sum, item) => sum + normalizedCost(item), 0), [items]);
+  const costPerYield = totalCost / Math.max(Number(recipe.yield_quantity) || 1, 1);
+
+  const setField = (field, value) => setRecipe((current) => ({ ...current, [field]: value }));
+  const setProductionField = (field, value) => setRecipe((current) => ({
+    ...current,
+    production_sheet: { ...(current.production_sheet || {}), [field]: value },
+  }));
+  const setItem = (index, field, value) => setItems((current) => current.map((item, i) => (
+    i === index ? { ...item, [field]: value } : item
+  )));
+
+  const addItem = () => setItems((current) => [
+    ...current,
+    { ...EMPTY_ITEM, sort_order: current.length },
+  ]);
+
+  const removeItem = (index) => setItems((current) => current.filter((_, i) => i !== index));
+  const toggleAllergen = (allergen) => setRecipe((current) => ({
+    ...current,
+    allergens: (current.allergens || []).includes(allergen)
+      ? current.allergens.filter((value) => value !== allergen)
+      : [...(current.allergens || []), allergen],
+  }));
+
+  const selectSourceRecipe = (index, sourceId) => {
+    const source = availableRecipes.find((candidate) => candidate.id === sourceId);
+    setItems((current) => current.map((item, itemIndex) => {
+      if (itemIndex !== index) return item;
+      if (!source) return { ...item, source_id: '', name: '', unit_cost: 0 };
+      const sourceUnit = source.yield_unit === 'unidades' ? 'unidad' : source.yield_unit;
+      return {
+        ...item,
+        source_type: 'recipe',
+        source_id: source.id,
+        name: source.name,
+        unit: sourceUnit,
+        unit_cost: sourceRecipeUnitCost(source, sourceUnit),
+      };
+    }));
+    if (source?.allergens?.length) {
+      setRecipe((current) => ({
+        ...current,
+        allergens: [...new Set([...(current.allergens || []), ...source.allergens])],
+      }));
+    }
+  };
+
+  const selectCatalogIngredient = (index, ingredientId) => {
+    const ingredient = availableIngredients.find((candidate) => candidate.id === ingredientId);
+    setItems((current) => current.map((item, itemIndex) => {
+      if (itemIndex !== index) return item;
+      if (!ingredient) return { ...item, source_id: '', name: '', unit_cost: 0 };
+      const unit = recipeUnitFromCatalog(ingredient.unidad);
+      return {
+        ...item,
+        source_type: 'ingredient',
+        source_id: ingredient.id,
+        name: ingredient.nombre,
+        unit,
+        unit_cost: catalogUnitCost(ingredient, unit),
+      };
+    }));
+  };
+
+  const recognizeCatalogIngredient = (index) => {
+    const item = items[index];
+    if (!item || item.source_type !== 'manual') return;
+    const ingredient = availableIngredients.find(
+      (candidate) => normalizeName(candidate.nombre) === normalizeName(item.name),
+    );
+    if (ingredient) selectCatalogIngredient(index, ingredient.id);
+  };
+
+  async function save(event) {
+    event.preventDefault();
+    setError('');
+    if (!recipe.name.trim()) return setError('Escribe el nombre de la receta.');
+    const validItems = items.filter((item) => item.name.trim() && Number(item.quantity) > 0);
+    if (!validItems.length) return setError('Añade al menos un ingrediente con cantidad.');
+
+    setSaving(true);
+    try {
+      const preparedItems = [];
+      for (const item of validItems) {
+        if (item.source_type !== 'manual') {
+          preparedItems.push(item);
+          continue;
+        }
+        let ingredient = availableIngredients.find(
+          (candidate) => normalizeName(candidate.nombre) === normalizeName(item.name),
+        );
+        if (!ingredient) {
+          const catalogPayload = {
+            nombre: item.name.trim(),
+            unidad: item.unit === 'unidad' ? 'ud.' : item.unit,
+            precio_coste: Number(item.unit_cost) || 0,
+            iva: 10,
+            stock_total: 0,
+            stock_minimo: 0,
+            activo: true,
+            updated_at: new Date().toISOString(),
+          };
+          const { data, error: catalogError } = await supabase
+            .from('ingredientes').insert(catalogPayload).select('*').single();
+          if (catalogError) throw catalogError;
+          ingredient = data;
+        }
+        preparedItems.push({
+          ...item,
+          source_type: 'ingredient',
+          source_id: ingredient.id,
+          name: ingredient.nombre,
+          unit_cost: catalogUnitCost(ingredient, item.unit),
+        });
+      }
+
+      const payload = {
+        name: recipe.name.trim(),
+        area: recipe.area,
+        description: recipe.description?.trim() || null,
+        yield_quantity: Number(recipe.yield_quantity) || 1,
+        yield_unit: recipe.yield_unit?.trim() || 'unidades',
+        process: recipe.process?.trim() || null,
+        product_id: recipe.product_id || null,
+        cost_sheet_id: recipe.cost_sheet_id || null,
+        active: recipe.active,
+        allergens: recipe.allergens || [],
+        production_sheet: recipe.production_sheet || {},
+      };
+
+      let recipeId = initial?.recipe?.id;
+      if (recipeId) {
+        const { error: recipeError } = await supabase.from('recipes').update(payload).eq('id', recipeId);
+        if (recipeError) throw recipeError;
+        const { error: deleteError } = await supabase.from('recipe_ingredients').delete().eq('recipe_id', recipeId);
+        if (deleteError) throw deleteError;
+      } else {
+        const { data, error: recipeError } = await supabase.from('recipes').insert(payload).select('id').single();
+        if (recipeError) throw recipeError;
+        recipeId = data.id;
+      }
+
+      const ingredientPayload = preparedItems.map((item, index) => ({
+        recipe_id: recipeId,
+        name: item.name.trim(),
+        quantity: Number(item.quantity),
+        unit: item.unit,
+        unit_cost: Number(item.unit_cost) || 0,
+        source_type: item.source_type,
+        source_id: item.source_id || null,
+        notes: item.notes?.trim() || null,
+        sort_order: index,
+      }));
+      const { error: itemsError } = await supabase.from('recipe_ingredients').insert(ingredientPayload);
+      if (itemsError) throw itemsError;
+      onSaved();
+    } catch (saveError) {
+      setError(saveError.message || 'No se ha podido guardar la receta.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="recipe-editor" onSubmit={save}>
+      <div className="recipe-editor__header">
+        <div>
+          <span className="recipe-eyebrow">{initial ? 'Editar receta' : 'Nueva receta'}</span>
+          <h2>{recipe.name || 'Receta sin nombre'}</h2>
+        </div>
+        <button type="button" className="icon-button" onClick={onCancel} aria-label="Cerrar"><X size={20} /></button>
+      </div>
+
+      {error && <div className="recipe-alert"><AlertCircle size={18} />{error}</div>}
+
+      <div className="recipe-grid recipe-grid--2">
+        <label>Nombre<input value={recipe.name} onChange={(e) => setField('name', e.target.value)} placeholder="Ej. Croissant de mantequilla" /></label>
+        <label>Sección<select value={recipe.area} onChange={(e) => setField('area', e.target.value)}><option value="cocina">Cocina</option><option value="obrador">Obrador</option></select></label>
+      </div>
+      <label>Descripción<textarea rows="2" value={recipe.description || ''} onChange={(e) => setField('description', e.target.value)} placeholder="Descripción breve o notas generales" /></label>
+
+      <div className="recipe-grid recipe-grid--4">
+        <label>Rendimiento<input type="number" min="0.001" step="0.001" value={recipe.yield_quantity} onChange={(e) => setField('yield_quantity', e.target.value)} /></label>
+        <label>Unidad producida<input value={recipe.yield_unit} onChange={(e) => setField('yield_unit', e.target.value)} placeholder="unidades / raciones / kg" /></label>
+        <label>ID producto (opcional)<input value={recipe.product_id || ''} onChange={(e) => setField('product_id', e.target.value)} placeholder="UUID del producto" /></label>
+        <label>ID escandallo (opcional)<input value={recipe.cost_sheet_id || ''} onChange={(e) => setField('cost_sheet_id', e.target.value)} placeholder="UUID del escandallo" /></label>
+      </div>
+
+      <div className="recipe-section-title"><div><h3>Ingredientes</h3><p>El coste unitario se expresa por la unidad elegida.</p></div><button type="button" className="secondary-button" onClick={addItem}><Plus size={17} />Ingrediente</button></div>
+      <div className="ingredients-table">
+        <div className="ingredients-table__head"><span>Ingrediente</span><span>Cantidad</span><span>Unidad</span><span>Origen</span><span>Coste/u.</span><span>Total</span><span /></div>
+        {items.map((item, index) => (
+          <div className="ingredients-table__row" key={item.id || index}>
+            {item.source_type === 'recipe' ? (
+              <select value={item.source_id || ''} onChange={(e) => selectSourceRecipe(index, e.target.value)}>
+                <option value="">Selecciona receta base…</option>
+                {availableRecipes.filter((candidate) => candidate.id !== initial?.recipe?.id).map((candidate) => (
+                  <option value={candidate.id} key={candidate.id}>{candidate.name} · {candidate.yield_quantity} {candidate.yield_unit}</option>
+                ))}
+              </select>
+            ) : item.source_type === 'ingredient' ? (
+              <select value={item.source_id || ''} onChange={(e) => selectCatalogIngredient(index, e.target.value)}>
+                <option value="">Selecciona ingrediente…</option>
+                {availableIngredients.map((ingredient) => <option value={ingredient.id} key={ingredient.id}>{ingredient.nombre} · {money.format(ingredient.precio_coste || 0)} / {ingredient.unidad}</option>)}
+              </select>
+            ) : <input list="recipe-ingredient-catalog" value={item.name} onChange={(e) => setItem(index, 'name', e.target.value)} onBlur={() => recognizeCatalogIngredient(index)} placeholder="Harina de fuerza" />}
+            <input type="number" min="0" step="0.001" value={item.quantity} onChange={(e) => setItem(index, 'quantity', e.target.value)} />
+            <select value={item.unit} onChange={(e) => setItem(index, 'unit', e.target.value)}>{UNITS.map((unit) => <option key={unit}>{unit}</option>)}</select>
+            <select value={item.source_type} onChange={(e) => {
+              const nextType = e.target.value;
+              setItems((current) => current.map((currentItem, itemIndex) => itemIndex === index ? {
+                ...currentItem, source_type: nextType,
+                ...(['recipe', 'ingredient'].includes(nextType) ? { source_id: '', name: '', unit_cost: 0 } : { source_id: '' }),
+              } : currentItem));
+            }}><option value="manual">Nuevo / manual</option><option value="ingredient">Catálogo</option><option value="product">Producto</option><option value="cost_sheet">Escandallo</option><option value="recipe">Otra receta</option></select>
+            <input type="number" min="0" step="0.0001" value={item.unit_cost} onChange={(e) => setItem(index, 'unit_cost', e.target.value)} readOnly={['recipe', 'ingredient'].includes(item.source_type)} title={['recipe', 'ingredient'].includes(item.source_type) ? 'Calculado desde el catálogo o la receta base' : ''} />
+            <strong>{money.format(normalizedCost(item))}</strong>
+            <button type="button" className="icon-button icon-button--danger" onClick={() => removeItem(index)} disabled={items.length === 1} aria-label="Eliminar ingrediente"><Trash2 size={17} /></button>
+          </div>
+        ))}
+      </div>
+      <datalist id="recipe-ingredient-catalog">{availableIngredients.map((ingredient) => <option value={ingredient.nombre} key={ingredient.id} />)}</datalist>
+
+      <div className="recipe-allergens">
+        <div className="recipe-section-title"><div><h3>Alérgenos</h3><p>Marca todos los presentes en la receta o sus ingredientes.</p></div></div>
+        <div className="allergen-selector">
+          {ALLERGENS.map(([value, label]) => (
+            <label className={(recipe.allergens || []).includes(value) ? 'selected' : ''} key={value}>
+              <input type="checkbox" checked={(recipe.allergens || []).includes(value)} onChange={() => toggleAllergen(value)} />
+              {label}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <section className="production-sheet">
+        <div className="production-sheet__title"><span>FITXA DE PRODUCCIÓ</span><strong>{recipe.name || 'Producte'}</strong></div>
+        <div className="recipe-grid recipe-grid--2">
+          <label>Data elaboració<input type="date" value={recipe.production_sheet?.elaboration_date || ''} onChange={(e) => setProductionField('elaboration_date', e.target.value)} /></label>
+          <label>Codi producte<input value={recipe.production_sheet?.product_code || ''} onChange={(e) => setProductionField('product_code', e.target.value)} placeholder="Codi intern" /></label>
+        </div>
+        <label>Procés elaboració<textarea rows="7" value={recipe.process || ''} onChange={(e) => setField('process', e.target.value)} placeholder={'1. Preparar els ingredients…\n2. Elaborar…\n3. Finalitzar…'} /></label>
+        <label>Control de producció<textarea rows="4" value={recipe.production_sheet?.production_control || ''} onChange={(e) => setProductionField('production_control', e.target.value)} placeholder="Pes, aspecte, incidències i comprovacions" /></label>
+        <label>Control de cocció<textarea rows="4" value={recipe.production_sheet?.cooking_control || ''} onChange={(e) => setProductionField('cooking_control', e.target.value)} placeholder="Temps i temperatura de cocció" /></label>
+        <label>Control refredament<textarea rows="4" value={recipe.production_sheet?.cooling_control || ''} onChange={(e) => setProductionField('cooling_control', e.target.value)} placeholder="Hora, temperatura inicial i temperatura final" /></label>
+        <label>Control de conservació<textarea rows="4" value={recipe.production_sheet?.conservation_control || ''} onChange={(e) => setProductionField('conservation_control', e.target.value)} placeholder="Temperatura i condicions de conservació" /></label>
+        <div className="recipe-section-title"><div><h3>Envasament</h3></div></div>
+        <div className="recipe-grid recipe-grid--2">
+          <label>Format envàs<input value={recipe.production_sheet?.packaging_format || ''} onChange={(e) => setProductionField('packaging_format', e.target.value)} /></label>
+          <label>Unitats per envàs<input value={recipe.production_sheet?.packaging_units || ''} onChange={(e) => setProductionField('packaging_units', e.target.value)} /></label>
+        </div>
+        <div className="packaging-methods"><strong>Mètode envasament</strong>{['Film', 'Buit', 'Altres'].map((method) => <label key={method}><input type="radio" name="packaging_method" value={method} checked={recipe.production_sheet?.packaging_method === method} onChange={(e) => setProductionField('packaging_method', e.target.value)} />{method}</label>)}</div>
+        {recipe.production_sheet?.packaging_method === 'Altres' && <label>Altres<input value={recipe.production_sheet?.packaging_other || ''} onChange={(e) => setProductionField('packaging_other', e.target.value)} /></label>}
+        <label>Producció final — Peces o Kg de producte en total<input value={recipe.production_sheet?.final_production || ''} onChange={(e) => setProductionField('final_production', e.target.value)} /></label>
+        <div className="recipe-section-title"><div><h3>Etiquetatge</h3></div></div>
+        <div className="recipe-grid recipe-grid--2">
+          <label>Producte<input value={recipe.production_sheet?.label_product || recipe.name} onChange={(e) => setProductionField('label_product', e.target.value)} /></label>
+          <label>Data d'elaboració (LOT)<input type="date" value={recipe.production_sheet?.lot_date || ''} onChange={(e) => setProductionField('lot_date', e.target.value)} /></label>
+          <label>Data de caducitat<input type="date" value={recipe.production_sheet?.expiry_date || ''} onChange={(e) => setProductionField('expiry_date', e.target.value)} /></label>
+        </div>
+      </section>
+
+      <div className="recipe-summary">
+        <div><span>Coste total</span><strong>{money.format(totalCost)}</strong></div>
+        <div><span>Coste por {recipe.yield_unit || 'unidad'}</span><strong>{money.format(costPerYield)}</strong></div>
+        <label className="recipe-toggle"><input type="checkbox" checked={recipe.active} onChange={(e) => setField('active', e.target.checked)} />Receta activa</label>
+      </div>
+
+      <div className="recipe-editor__actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancelar</button><button className="primary-button" disabled={saving}>{saving ? <Loader2 className="spin" size={18} /> : <Save size={18} />}{saving ? 'Guardando…' : 'Guardar receta'}</button></div>
+    </form>
+  );
+}
+
+export default function Recetas() {
+  const [recipes, setRecipes] = useState([]);
+  const [catalogIngredients, setCatalogIngredients] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [area, setArea] = useState('all');
+  const [search, setSearch] = useState('');
+  const [editor, setEditor] = useState(null);
+
+  const loadRecipes = useCallback(async () => {
+    setLoading(true); setError('');
+    const [recipeResult, ingredientResult] = await Promise.all([
+      supabase.from('recipes').select('*, recipe_ingredients(*)').order('updated_at', { ascending: false }),
+      supabase.from('ingredientes').select('*').eq('activo', true).order('nombre', { ascending: true }),
+    ]);
+    const queryError = recipeResult.error || ingredientResult.error;
+    if (queryError) setError(queryError.message);
+    else {
+      const catalog = ingredientResult.data || [];
+      setCatalogIngredients(catalog);
+      setRecipes((recipeResult.data || []).map((recipe) => ({
+        ...recipe,
+        recipe_ingredients: (recipe.recipe_ingredients || []).map((item) => {
+          if (item.source_type !== 'ingredient' || !item.source_id) return item;
+          const ingredient = catalog.find((candidate) => candidate.id === item.source_id);
+          return ingredient ? { ...item, unit_cost: catalogUnitCost(ingredient, item.unit) } : item;
+        }),
+      })));
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { loadRecipes(); }, [loadRecipes]);
+
+  const visible = useMemo(() => recipes.filter((recipe) => {
+    const matchesArea = area === 'all' || recipe.area === area;
+    const needle = search.trim().toLocaleLowerCase('es');
+    const matchesSearch = !needle || `${recipe.name} ${recipe.description || ''}`.toLocaleLowerCase('es').includes(needle);
+    return matchesArea && matchesSearch;
+  }), [recipes, area, search]);
+
+  async function removeRecipe(recipe) {
+    if (!window.confirm(`¿Eliminar la receta “${recipe.name}”?`)) return;
+    const { error: deleteError } = await supabase.from('recipes').delete().eq('id', recipe.id);
+    if (deleteError) setError(deleteError.message); else loadRecipes();
+  }
+
+  if (editor) return <RecipeForm initial={editor === 'new' ? null : editor} availableRecipes={recipes} availableIngredients={catalogIngredients} onCancel={() => setEditor(null)} onSaved={() => { setEditor(null); loadRecipes(); }} />;
+
+  return (
+    <main className="recipes-page">
+      <header className="recipes-hero">
+        <div><span className="recipe-eyebrow">Producción propia</span><h1>Recetas</h1><p>Fichas de elaboración, rendimiento y coste para Cocina y Obrador.</p></div>
+        <button className="primary-button" onClick={() => setEditor('new')}><Plus size={19} />Nueva receta</button>
+      </header>
+
+      <section className="recipe-stats">
+        <div><BookOpen size={22} /><span><strong>{recipes.length}</strong> recetas</span></div>
+        <div><ChefHat size={22} /><span><strong>{recipes.filter((r) => r.area === 'cocina').length}</strong> cocina</span></div>
+        <div><Croissant size={22} /><span><strong>{recipes.filter((r) => r.area === 'obrador').length}</strong> obrador</span></div>
+      </section>
+
+      <section className="recipes-toolbar">
+        <div className="recipes-tabs">{[['all', 'Todas'], ['cocina', 'Cocina'], ['obrador', 'Obrador']].map(([value, label]) => <button key={value} className={area === value ? 'active' : ''} onClick={() => setArea(value)}>{label}</button>)}</div>
+        <label className="recipe-search"><Search size={18} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar receta…" /></label>
+      </section>
+
+      {error && <div className="recipe-alert"><AlertCircle size={18} />{error}</div>}
+      {loading ? <div className="recipe-empty"><Loader2 className="spin" size={30} /><p>Cargando recetas…</p></div> : visible.length === 0 ? <div className="recipe-empty"><BookOpen size={38} /><h3>No hay recetas</h3><p>Crea la primera receta o cambia los filtros.</p></div> : (
+        <section className="recipe-cards">
+          {visible.map((recipe) => {
+            const total = (recipe.recipe_ingredients || []).reduce((sum, item) => sum + normalizedCost(item), 0);
+            const perUnit = total / Math.max(Number(recipe.yield_quantity) || 1, 1);
+            return <article className="recipe-card" key={recipe.id}>
+              <div className="recipe-card__top"><span className={`area-badge area-badge--${recipe.area}`}>{recipe.area === 'cocina' ? <ChefHat size={15} /> : <Croissant size={15} />}{recipe.area}</span><span className={`status-dot ${recipe.active ? '' : 'inactive'}`}>{recipe.active ? 'Activa' : 'Inactiva'}</span></div>
+              <h2>{recipe.name}</h2><p>{recipe.description || 'Sin descripción'}</p>
+              {(recipe.allergens || []).length > 0 ? <div className="allergen-badges" aria-label="Alérgenos">{recipe.allergens.map((value) => <span key={value}>{ALLERGENS.find(([key]) => key === value)?.[1] || value}</span>)}</div> : <div className="allergen-badges allergen-badges--empty">Alérgenos sin indicar</div>}
+              <div className="recipe-card__meta"><span><Package size={16} />{number.format(recipe.yield_quantity)} {recipe.yield_unit}</span><span><Calculator size={16} />{money.format(perUnit)} / {recipe.yield_unit}</span></div>
+              <div className="recipe-card__cost"><span>Coste receta</span><strong>{money.format(total)}</strong></div>
+              <div className="recipe-card__actions"><button className="secondary-button" onClick={() => printProductionSheet(recipe)}><Printer size={16} />Fitxa PDF</button><button className="secondary-button" onClick={() => setEditor({ recipe, items: recipe.recipe_ingredients })}><Edit3 size={16} />Editar</button><button className="icon-button icon-button--danger" onClick={() => removeRecipe(recipe)} aria-label="Eliminar receta"><Trash2 size={17} /></button></div>
+            </article>;
+          })}
+        </section>
+      )}
+    </main>
+  );
+}

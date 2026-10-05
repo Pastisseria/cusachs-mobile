@@ -1,0 +1,22 @@
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import './datosFacturaPremium.css'
+import './presupuestoClienteExtra.js'
+import './dashboardEstadisticasCatering.js'
+import './presupuestoFacturadoControl.js'
+import './finalizarFacturacionPresupuesto.js'
+import './datosFacturaSimplificado.js'
+import './historicoFacturacionFiltro.js'
+import './produccionPrintA4.css'
+import './mobile.css'
+import App from './App.jsx'
+import { AuthProvider } from './auth/AuthContext.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <AuthProvider>
+      <App />
+    </AuthProvider>
+  </StrictMode>,
+)
