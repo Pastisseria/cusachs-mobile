@@ -1,10 +1,10 @@
 .mobile-header,.mobile-nav{display:none}
 
 @media (max-width: 760px){
-  body{padding-bottom:78px;background:#f6f3f7}
-  .app-mobile{display:block;min-height:100vh}
+  html,body,#root{min-height:100%;height:auto;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch}\n  body{padding-bottom:78px;background:#f6f3f7}
+  .app-mobile{display:block;min-height:100dvh;height:auto;overflow:visible}
   .app-mobile>.sidebar{position:fixed;z-index:1200}
-  .app-mobile .contenido{padding:78px 12px 92px;width:100%;overflow-x:hidden}
+  .app-mobile .contenido{padding:78px 12px calc(110px + env(safe-area-inset-bottom));width:100%;min-height:100dvh;height:auto;overflow-x:hidden;overflow-y:visible;touch-action:pan-y}
   .mobile-header{display:flex;position:fixed;z-index:1000;top:0;left:0;right:0;height:64px;align-items:center;gap:14px;padding:8px 14px;background:#fff;border-bottom:1px solid #e5dce9;box-shadow:0 3px 14px rgba(40,0,53,.08)}
   .mobile-header .boton-menu-tablet{display:inline-flex;position:static;width:46px;height:46px;min-height:46px;padding:0;border-radius:14px;font-size:23px}
   .mobile-header>div{display:flex;flex-direction:column;line-height:1.05}
