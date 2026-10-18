@@ -1,3 +1,4 @@
+import { iniciarOffline } from './lib/offline.js'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
@@ -12,6 +13,8 @@ import './produccionPrintA4.css'
 import './mobile.css'
 import App from './App.jsx'
 import { AuthProvider } from './auth/AuthContext.jsx'
+
+iniciarOffline()
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
